@@ -1,0 +1,11 @@
+# The language to output bindings in
+#
+# possible values: "C", "C++"
+#
+# default: "C++"
+language = "C"
+
+
+# An optional namespace to output around the generated bindings
+# default: doesn't emit a namespace
+namespace = "mc"
