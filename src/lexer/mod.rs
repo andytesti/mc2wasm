@@ -5,15 +5,18 @@ use nom::branch::alt;
 use nom::bytes::complete::{escaped, tag, take, take_while};
 use nom::bytes::complete::{is_a, take_until};
 use nom::character::complete::{
-    alphanumeric1, char, digit1, line_ending, multispace0, multispace1, none_of, one_of, space1,
+    alpha0, alphanumeric0, alphanumeric1, char, digit1, line_ending, multispace0, multispace1,
+    none_of, one_of, space1,
 };
 use nom::character::{is_alphabetic, is_space};
 use nom::combinator::{cut, iterator, map, map_res, verify};
-use nom::error::context;
+use nom::error::{context, ErrorKind};
 use nom::lib::std::str::FromStr;
-use nom::multi::separated_list;
+use nom::multi::{many1, separated_list};
 use nom::sequence::{preceded, terminated};
-use nom::{FindToken, IResult, InputIter, InputLength, InputTake, Slice};
+use nom::{
+    AsChar, FindToken, IResult, InputIter, InputLength, InputTake, InputTakeAtPosition, Slice,
+};
 
 use crate::lexer::token::Token;
 
@@ -112,8 +115,16 @@ fn line_comment(i: Input) -> Result<Token> {
     )(i)
 }
 
+pub fn ident_char(input: Input) -> Result<Input> {
+    // TODO add more specific error
+    input.split_at_position1_complete(
+        |item| !(item.is_alphanum() || item == '_'),
+        ErrorKind::Alpha,
+    )
+}
+
 fn parse_word(i: Input) -> Result<Input> {
-    verify(alphanumeric1, |s: &str| {
+    verify(ident_char, |s: &str| {
         s.chars().next().filter(|c| !c.is_numeric()).is_some()
     })(i)
 }

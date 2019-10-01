@@ -226,11 +226,11 @@ mod tests {
 
     #[test]
     fn parse_ident() {
-        let token_input = vec![Token::Ident("identifier")];
+        let (_, token_input) = Lexer::tokenize("_identifier1").unwrap();
         let tokens = Tokens::new(&token_input);
-        let (_, id) = expr(tokens).unwrap();
+        let (_, lit) = expr(tokens).unwrap();
 
-        assert_eq!(id, Expr::Ident(Ident("identifier")))
+        assert_eq!(lit, Expr::Ident(Ident("_identifier1")))
     }
 
     #[test]
