@@ -62,12 +62,16 @@ pub enum Token<'a> {
     True,
 
     Inc,
-    IncAssign,
+    Dec,
 
     Arrow,
 
     Add,
     AddAssign,
+    Sub,
+    SubAssign,
+    Mul,
+    MulAssign,
     Div,
     DivAssign,
 
@@ -96,6 +100,15 @@ pub enum Token<'a> {
     Distinct,
     Exclamation,
     Question,
+
+    SLeftAssign,
+    SLeft,
+    LessEqual,
+    Less,
+    SRightAssign,
+    SRight,
+    GreaterEqual,
+    Greater,
 
     OpenBracket,
     CloseBracket,
@@ -143,7 +156,7 @@ pub struct Tokens<'a> {
 }
 
 impl<'a> Tokens<'a> {
-    pub fn new(vec: &'a Vec<Token>) -> Self {
+    pub fn new(vec: &'a Vec<Token<'a>>) -> Self {
         Tokens {
             tok: vec.as_slice(),
             start: 0,

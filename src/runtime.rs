@@ -240,7 +240,9 @@ pub type Value = Option<Rc<Box<dyn Object>>>;
 pub type McResult = Result<Value, Error>;
 
 impl Object for Number {}
+
 impl Object for Boolean {}
+
 impl Object for &'static str {}
 
 #[derive(Debug, Clone)]
@@ -262,14 +264,15 @@ pub enum Error {
     MC_STACK_OVERFLOW,
     */
     IllegalFrame(Number),
-    SymbolNotFound(&'static str), /*
-                                   MC_SYSTEM_ERROR,
-                                   MC_TOO_MANY_ARGUENTS,
-                                   MC_TOO_MANY_TIMERS,
-                                   MC_UNEXPECTED_TYPE,
-                                   MC_UNHANDLED_EXCEPTION,
-                                   MC_WATCHDOG_TRIPPED
-                                  */
+    SymbolNotFound(&'static str),
+    /*
+     MC_SYSTEM_ERROR,
+     MC_TOO_MANY_ARGUENTS,
+     MC_TOO_MANY_TIMERS,
+     MC_UNEXPECTED_TYPE,
+     MC_UNHANDLED_EXCEPTION,
+     MC_WATCHDOG_TRIPPED
+    */
     UnmappedError,
     UnmappedSuccess,
 }

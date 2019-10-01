@@ -23,25 +23,24 @@ type Input<'a> = &'a str;
 type Error = ();
 type Result<'a, Output> = IResult<Input<'a>, Output>;
 
-macro_rules! symbols {
-    ($($tag: expr => $name: expr), *) => (
-        alt(($(map(tag($tag), |_| $name),)*))
-    )
+fn sym<'a>(s: &'static str, t: Token<'a>) -> impl Fn(Input<'a>) -> Result<Token<'a>> {
+    map(tag(s), move |_| t.clone())
 }
 
 fn delimiter(i: Input) -> Result<Token> {
-    symbols! (
-        "(" => Token::OpenParen,
-        ")" => Token::CloseParen,
-        "{" => Token::OpenBracket,
-        "}" => Token::CloseBracket,
-        "[" => Token::OpenSquare,
-        "]" => Token::CloseSquare,
-        "," => Token::Comma,
-        ";" => Token::Semicolon,
-        ":" => Token::Colon,
-        "?" => Token::Question
-    )(i)
+    alt((
+        sym("(", Token::OpenParen),
+        sym(")", Token::CloseParen),
+        sym("{", Token::OpenBracket),
+        sym("}", Token::CloseBracket),
+        sym("[", Token::OpenSquare),
+        sym("]", Token::CloseSquare),
+        sym(",", Token::Comma),
+        sym(";", Token::Semicolon),
+        sym(":", Token::Colon),
+        sym("?", Token::Question),
+        sym(".", Token::Dot),
+    ))(i)
 }
 
 fn parse_str(i: Input) -> Result<Input> {
@@ -58,28 +57,52 @@ fn string_literal(i: Input) -> Result<Token> {
     )(i)
 }
 
+fn logical(i: Input) -> Result<Token> {
+    alt((
+        sym("&=", Token::BitAndAssign),
+        sym("&&", Token::And),
+        sym("&", Token::BitAnd),
+        sym("|=", Token::BitOrAssign),
+        sym("||", Token::Or),
+        sym("|", Token::BitOr),
+    ))(i)
+}
+
+fn relational(i: Input) -> Result<Token> {
+    alt((
+        sym("!=", Token::Distinct),
+        sym("!", Token::Exclamation),
+        sym("=>", Token::Arrow),
+        sym("==", Token::Equal),
+        sym("=", Token::Assign),
+        sym("<<=", Token::SLeftAssign),
+        sym("<<", Token::SLeft),
+        sym("<=", Token::LessEqual),
+        sym("<", Token::Less),
+        sym(">>=", Token::SRightAssign),
+        sym(">>", Token::SRight),
+        sym(">=", Token::GreaterEqual),
+        sym(">", Token::Greater),
+    ))(i)
+}
+
+fn arithmetical(i: Input) -> Result<Token> {
+    alt((
+        sym("++", Token::Inc),
+        sym("+=", Token::AddAssign),
+        sym("+", Token::Add),
+        sym("--", Token::Dec),
+        sym("-=", Token::SubAssign),
+        sym("-", Token::Sub),
+        sym("*=", Token::MulAssign),
+        sym("*", Token::Mul),
+        sym("/=", Token::DivAssign),
+        sym("/", Token::Div),
+    ))(i)
+}
+
 fn operator(i: Input) -> Result<Token> {
-    symbols! (
-        "++" => Token::Inc,
-        "+=" => Token::AddAssign,
-        "+" => Token::Add,
-        "/=" => Token::DivAssign,
-        "/" => Token::Div,
-        "&=" => Token::BitAndAssign,
-        "&&" => Token::And,
-        "&" => Token::BitAnd,
-        "|=" => Token::BitOrAssign,
-        "||" => Token::Or,
-        "|" => Token::BitOr,
-        "." => Token::Dot,
-        "=>" => Token::Arrow,
-        ":" => Token::Colon,
-        "!=" => Token::Distinct,
-        "!" => Token::Exclamation,
-        "?" => Token::Question,
-        "==" => Token::Equal,
-        "=" => Token::Assign
-    )(i)
+    alt((logical, relational, arithmetical))(i)
 }
 
 fn line_comment(i: Input) -> Result<Token> {

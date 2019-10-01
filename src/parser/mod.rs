@@ -17,8 +17,10 @@ use crate::parser::ast::{
     InitializableDef, InvokeExpr, Literal, ModuleDef, ModuleMember, NewObject, Path, RootModuleDef,
     Scope, Stmt, StmtBlock, SwitchStmt, TryStmt, Using, VarDef, Visibility, WhileStmt,
 };
+use crate::parser::expression::{call, expr, group, ident, literal, path, symbol_literal};
 
 pub mod ast;
+mod expression;
 
 type Input<'a> = Tokens<'a>;
 type Result<'a, Output> = IResult<Input<'a>, Output>;
@@ -57,58 +59,6 @@ fn between_brackets<'a, T: 'a>(
     between(Token::OpenBracket, term, Token::CloseBracket)
 }
 
-fn string_literal(i: Input) -> Result<&str> {
-    i.pop_token(|t| match t {
-        Token::StringLiteral(s) => Some(*s),
-        _ => None,
-    })
-}
-
-fn symbol_literal(i: Input) -> Result<Ident> {
-    i.pop_token(|t| match t {
-        Token::Symbol(s) => Some(Ident(*s)),
-        _ => None,
-    })
-}
-
-fn ident(i: Input) -> Result<Ident> {
-    i.pop_token(|t| match t {
-        Token::Ident(v) => Some(Ident(v)),
-        _ => None,
-    })
-}
-
-fn int_literal(i: Input) -> Result<i64> {
-    i.pop_token(|t| match t {
-        Token::IntLiteral(i) => Some(*i),
-        _ => None,
-    })
-}
-
-fn boolean_literal(i: Input) -> Result<bool> {
-    alt((
-        map(tag(Token::False), |_| false),
-        map(tag(Token::True), |_| true),
-    ))(i)
-}
-
-fn literal(i: Input) -> Result<Literal> {
-    alt((
-        map(int_literal, Literal::Integer),
-        map(string_literal, Literal::String),
-        map(symbol_literal, Literal::Symbol),
-        map(boolean_literal, Literal::Boolean),
-    ))(i)
-}
-
-fn literal_expr(i: Input) -> Result<Expr> {
-    map(literal, Expr::Literal)(i)
-}
-
-fn path(i: Input) -> Result<Path> {
-    map(separated_list(tag(Token::Dot), ident), Path)(i)
-}
-
 fn using(i: Input) -> Result<Using> {
     map(
         preceded(
@@ -117,34 +67,6 @@ fn using(i: Input) -> Result<Using> {
         ),
         |(path, alias)| Using { path, alias },
     )(i)
-}
-
-fn ident_expr(i: Input) -> Result<Expr> {
-    map(ident, Expr::Ident)(i)
-}
-
-fn me(i: Input) -> Result<Expr> {
-    map(tag(Token::Me), |_| Expr::Me)(i)
-}
-
-fn null(i: Input) -> Result<Expr> {
-    map(tag(Token::Null), |_| Expr::Null)(i)
-}
-
-fn non_invoke_expr(i: Input) -> Result<Expr> {
-    alt((
-        group_expr,
-        me,
-        null,
-        assignation_expr,
-        new_dictionary_expr,
-        new_array_expr,
-        new_empty_array_expr,
-        new_object_expr,
-        call_expr,
-        ident_expr,
-        literal_expr,
-    ))(i)
 }
 
 fn return_stmt(i: Input) -> Result<Stmt> {
@@ -182,10 +104,6 @@ fn const_def(i: Input) -> Result<ConstDef> {
     )(i)
 }
 
-fn args(i: Input) -> Result<Vec<Expr>> {
-    between_parens(separated_list(tag(Token::Comma), expr))(i)
-}
-
 fn assignation(i: Input) -> Result<Assignation> {
     map(
         separated_pair(ident, tag(Token::Assign), expr),
@@ -195,90 +113,6 @@ fn assignation(i: Input) -> Result<Assignation> {
 
 fn assignation_stmt(i: Input) -> Result<Stmt> {
     map(assignation, Stmt::Assignation)(i)
-}
-
-fn assignation_expr(i: Input) -> Result<Expr> {
-    map(assignation, |a| Expr::Assignation(Box::new(a)))(i)
-}
-
-fn call(i: Input) -> Result<CallExpr> {
-    map(pair(ident, args), |(name, arguments)| CallExpr {
-        name,
-        arguments,
-        then: None,
-    })(i)
-}
-
-fn call_expr(i: Input) -> Result<Expr> {
-    map(call, Expr::Call)(i)
-}
-
-fn invoke_expr(i: Input) -> Result<Option<CallExpr>> {
-    opt(map(
-        pair(preceded(tag(Token::Dot), call), invoke_expr),
-        |(mut call, then)| {
-            call.then = then.map(Box::new);
-            call
-        },
-    ))(i)
-}
-
-fn group(i: Input) -> Result<Group> {
-    map(between_parens(expr), Group)(i)
-}
-
-fn group_expr(i: Input) -> Result<Expr> {
-    map(group, |g| Expr::Group(Box::new(g)))(i)
-}
-
-fn dictionary_entry(i: Input) -> Result<(Expr, Expr)> {
-    separated_pair(expr, tag(Token::Arrow), expr)(i)
-}
-
-fn new_dictionary(i: Input) -> Result<Vec<(Expr, Expr)>> {
-    between_brackets(separated_list(tag(Token::Comma), dictionary_entry))(i)
-}
-
-fn new_dictionary_expr(i: Input) -> Result<Expr> {
-    map(new_dictionary, Expr::NewDictionary)(i)
-}
-
-fn new_object(i: Input) -> Result<NewObject> {
-    map(
-        preceded(tag(Token::New), pair(path, args)),
-        |(path, args)| NewObject { path, args },
-    )(i)
-}
-
-fn new_array(i: Input) -> Result<Vec<Expr>> {
-    between_squares(separated_list(tag(Token::Comma), expr))(i)
-}
-
-fn new_array_expr(i: Input) -> Result<Expr> {
-    map(new_array, Expr::NewArray)(i)
-}
-
-fn new_empty_array_expr(i: Input) -> Result<Expr> {
-    map(preceded(tag(Token::New), between_squares(expr)), |size| {
-        Expr::NewEmptyArray(Box::new(size))
-    })(i)
-}
-
-fn new_object_expr(i: Input) -> Result<Expr> {
-    map(new_object, Expr::NewObject)(i)
-}
-
-fn expr(i: Input) -> Result<Expr> {
-    map(pair(non_invoke_expr, invoke_expr), |(a, b)| {
-        if let Some(inv) = b {
-            Expr::Invoke(Box::new(InvokeExpr {
-                receiver: a,
-                call: inv,
-            }))
-        } else {
-            a
-        }
-    })(i)
 }
 
 fn call_stmt(i: Input) -> Result<Stmt> {
@@ -382,7 +216,7 @@ fn if_stmt(i: Input) -> Result<Stmt> {
         )),
         |(cond, true_branch, false_branch)| {
             Stmt::IfStmt(Box::new(IfStmt {
-                cond: cond.0,
+                cond,
                 true_branch,
                 false_branch,
             }))
@@ -586,37 +420,9 @@ fn try_stmt(i: Input) -> Result<Stmt> {
 }
 
 mod tests {
-
     use crate::lexer::Lexer;
 
     use super::*;
-
-    #[test]
-    fn parse_ident() {
-        let token_input = vec![Token::Ident("identifier")];
-        let tokens = Tokens::new(&token_input);
-        let (_, id) = ident(tokens).unwrap();
-
-        assert_eq!(id, Ident("identifier"))
-    }
-
-    #[test]
-    fn parse_int_literal() {
-        let token_input = vec![Token::IntLiteral(12)];
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = int_literal(tokens).unwrap();
-
-        assert_eq!(lit, 12)
-    }
-
-    #[test]
-    fn parse_path() {
-        let token_input = vec![Token::Ident("a"), Token::Dot, Token::Ident("b")];
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = path(tokens).unwrap();
-
-        assert_eq!(lit, Path(vec![Ident("a"), Ident("b")]))
-    }
 
     #[test]
     fn parse_using() {
@@ -628,7 +434,7 @@ mod tests {
             lit,
             Using {
                 path: Path(vec![Ident("a"), Ident("b")]),
-                alias: None
+                alias: None,
             }
         )
     }
@@ -643,7 +449,7 @@ mod tests {
             lit,
             Using {
                 path: Path(vec![Ident("a"), Ident("b")]),
-                alias: Some(Ident("d"))
+                alias: Some(Ident("d")),
             }
         )
     }
@@ -676,7 +482,7 @@ mod tests {
             lit,
             VarDef {
                 name: Ident("a"),
-                init: None
+                init: None,
             }
         )
     }
@@ -691,63 +497,8 @@ mod tests {
             lit,
             ConstDef {
                 name: Ident("AGE"),
-                init: Expr::Literal(Literal::Integer(20))
+                init: Expr::Literal(Literal::Integer(20)),
             }
-        )
-    }
-
-    #[test]
-    fn parse_new_object() {
-        let def = r#"new Lang.Object(12)"#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = new_object(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            NewObject {
-                path: Path(vec![Ident("Lang"), Ident("Object")]),
-                args: vec![Expr::Literal(Literal::Integer(12))]
-            }
-        )
-    }
-
-    #[test]
-    fn parse_integer_expr() {
-        let (_, token_input) = Lexer::tokenize("12").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(lit, Expr::Literal(Literal::Integer(12)))
-    }
-
-    #[test]
-    fn parse_new_dictionary_expr() {
-        let (_, token_input) = Lexer::tokenize(
-            r#"
-        {
-            :x => "hello",
-            12 => false
-        }
-        "#,
-        )
-        .unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Expr::NewDictionary(vec![
-                (
-                    Expr::Literal(Literal::Symbol(Ident("x"))),
-                    Expr::Literal(Literal::String("hello"))
-                ),
-                (
-                    Expr::Literal(Literal::Integer(12)),
-                    Expr::Literal(Literal::Boolean(false))
-                )
-            ])
         )
     }
 
@@ -761,7 +512,7 @@ mod tests {
             lit,
             VarDef {
                 name: Ident("a"),
-                init: Some(Expr::Literal(Literal::Integer(12)))
+                init: Some(Expr::Literal(Literal::Integer(12))),
             }
         )
     }
@@ -797,10 +548,10 @@ mod tests {
                             Stmt::Call(CallExpr {
                                 name: Ident("sayHello"),
                                 arguments: vec![Expr::Literal(Literal::String("Mike"))],
-                                then: None
+                                then: None,
                             }),
                             Stmt::Break
-                        ]
+                        ],
                     },
                     CaseBlock {
                         labels: vec![
@@ -815,20 +566,20 @@ mod tests {
                             Stmt::Call(CallExpr {
                                 name: Ident("sayBye"),
                                 arguments: vec![Expr::Literal(Literal::String("Ralf"))],
-                                then: None
+                                then: None,
                             }),
                             Stmt::Break
-                        ]
+                        ],
                     },
                     CaseBlock {
                         labels: vec![CaseLabel::Default],
                         statements: vec![Stmt::Call(CallExpr {
                             name: Ident("print"),
                             arguments: vec![Expr::Literal(Literal::String("Nothing to do"))],
-                            then: None
-                        })]
+                            then: None,
+                        })],
                     }
-                ]
+                ],
             })
         )
     }
@@ -849,7 +600,7 @@ mod tests {
             lit,
             CatchStmt {
                 guard: CatchGuard::Variable(Ident("x")),
-                body: vec![Stmt::Break]
+                body: vec![Stmt::Break],
             }
         )
     }
@@ -871,9 +622,9 @@ mod tests {
             CatchStmt {
                 guard: CatchGuard::InstanceOf(
                     Ident("n"),
-                    Path(vec![Ident("Toybox"), Ident("Lang"), Ident("Number")])
+                    Path(vec![Ident("Toybox"), Ident("Lang"), Ident("Number")]),
                 ),
-                body: vec![Stmt::Break]
+                body: vec![Stmt::Break],
             }
         )
     }
@@ -907,16 +658,16 @@ mod tests {
                     CatchStmt {
                         guard: CatchGuard::InstanceOf(
                             Ident("ex"),
-                            Path(vec![Ident("AnExceptionClass")])
+                            Path(vec![Ident("AnExceptionClass")]),
                         ),
-                        body: vec![]
+                        body: vec![],
                     },
                     CatchStmt {
                         guard: CatchGuard::Variable(Ident("ex")),
-                        body: vec![]
+                        body: vec![],
                     }
                 ],
-                finally_body: Some(vec![])
+                finally_body: Some(vec![]),
             })
         )
     }
@@ -943,27 +694,27 @@ mod tests {
             EnumDef(vec![
                 InitializableDef {
                     name: Ident("x"),
-                    init: Some(Expr::Literal(Literal::Integer(1337)))
+                    init: Some(Expr::Literal(Literal::Integer(1337))),
                 },
                 InitializableDef {
                     name: Ident("y"),
-                    init: None
+                    init: None,
                 },
                 InitializableDef {
                     name: Ident("z"),
-                    init: None
+                    init: None,
                 },
                 InitializableDef {
                     name: Ident("a"),
-                    init: Some(Expr::Literal(Literal::Integer(0)))
+                    init: Some(Expr::Literal(Literal::Integer(0))),
                 },
                 InitializableDef {
                     name: Ident("b"),
-                    init: None
+                    init: None,
                 },
                 InitializableDef {
                     name: Ident("c"),
-                    init: None
+                    init: None,
                 }
             ])
         )
@@ -1019,8 +770,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ClassMember::ConstDef(ConstDef {
                             name: Ident("APK"),
-                            init: Expr::Literal(Literal::String("1232130023"))
-                        })
+                            init: Expr::Literal(Literal::String("1232130023")),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1029,17 +780,17 @@ mod tests {
                         definition: ClassMember::EnumDef(EnumDef(vec![
                             InitializableDef {
                                 name: Ident("red"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("green"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("blue"),
-                                init: None
+                                init: None,
                             }
-                        ]))
+                        ])),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1047,8 +798,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ClassMember::VarDef(VarDef {
                             name: Ident("name"),
-                            init: Some(Expr::Literal(Literal::String("MyApp")))
-                        })
+                            init: Some(Expr::Literal(Literal::String("MyApp"))),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1057,8 +808,8 @@ mod tests {
                         definition: ClassMember::FunctionDef(FunctionDef {
                             name: Ident("onStart"),
                             params: vec![Ident("state")],
-                            body: vec![]
-                        })
+                            body: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1067,8 +818,8 @@ mod tests {
                         definition: ClassMember::FunctionDef(FunctionDef {
                             name: Ident("onStop"),
                             params: vec![Ident("state")],
-                            body: vec![]
-                        })
+                            body: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1080,10 +831,10 @@ mod tests {
                             body: vec![Stmt::Return(Expr::NewArray(vec![Expr::NewObject(
                                 NewObject {
                                     path: Path(vec![Ident("MyProjectView")]),
-                                    args: vec![Expr::Literal(Literal::String("Hello world"))]
+                                    args: vec![Expr::Literal(Literal::String("Hello world"))],
                                 }
-                            )]))]
-                        })
+                            )]))],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![Ident("debug")],
@@ -1092,10 +843,10 @@ mod tests {
                         definition: ClassMember::FunctionDef(FunctionDef {
                             name: Ident("whenDebugging"),
                             params: vec![],
-                            body: vec![]
-                        })
+                            body: vec![],
+                        }),
                     }
-                ]
+                ],
             }
         )
     }
@@ -1144,8 +895,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ModuleMember::ConstDef(ConstDef {
                             name: Ident("APK"),
-                            init: Expr::Literal(Literal::String("1232130023"))
-                        })
+                            init: Expr::Literal(Literal::String("1232130023")),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1154,17 +905,17 @@ mod tests {
                         definition: ModuleMember::EnumDef(EnumDef(vec![
                             InitializableDef {
                                 name: Ident("red"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("green"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("blue"),
-                                init: None
+                                init: None,
                             }
-                        ]))
+                        ])),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1172,8 +923,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ModuleMember::VarDef(VarDef {
                             name: Ident("name"),
-                            init: Some(Expr::Literal(Literal::String("MyApp")))
-                        })
+                            init: Some(Expr::Literal(Literal::String("MyApp"))),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![Ident("debug")],
@@ -1182,8 +933,8 @@ mod tests {
                         definition: ModuleMember::FunctionDef(FunctionDef {
                             name: Ident("whenDebugging"),
                             params: vec![],
-                            body: vec![]
-                        })
+                            body: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1192,8 +943,8 @@ mod tests {
                         definition: ModuleMember::ClassDef(ClassDef {
                             name: Ident("SomeClass"),
                             extends: None,
-                            members: vec![]
-                        })
+                            members: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1201,10 +952,10 @@ mod tests {
                         visibility: Visibility::Public,
                         definition: ModuleMember::ModuleDef(ModuleDef {
                             name: Ident("ModuleB"),
-                            members: vec![]
-                        })
+                            members: vec![],
+                        }),
                     },
-                ]
+                ],
             }
         )
     }
@@ -1249,8 +1000,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ModuleMember::ConstDef(ConstDef {
                             name: Ident("APK"),
-                            init: Expr::Literal(Literal::String("1232130023"))
-                        })
+                            init: Expr::Literal(Literal::String("1232130023")),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1259,17 +1010,17 @@ mod tests {
                         definition: ModuleMember::EnumDef(EnumDef(vec![
                             InitializableDef {
                                 name: Ident("red"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("green"),
-                                init: None
+                                init: None,
                             },
                             InitializableDef {
                                 name: Ident("blue"),
-                                init: None
+                                init: None,
                             }
-                        ]))
+                        ])),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1277,8 +1028,8 @@ mod tests {
                         visibility: Visibility::Private,
                         definition: ModuleMember::VarDef(VarDef {
                             name: Ident("name"),
-                            init: Some(Expr::Literal(Literal::String("MyApp")))
-                        })
+                            init: Some(Expr::Literal(Literal::String("MyApp"))),
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![Ident("debug")],
@@ -1287,8 +1038,8 @@ mod tests {
                         definition: ModuleMember::FunctionDef(FunctionDef {
                             name: Ident("whenDebugging"),
                             params: vec![],
-                            body: vec![]
-                        })
+                            body: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1297,8 +1048,8 @@ mod tests {
                         definition: ModuleMember::ClassDef(ClassDef {
                             name: Ident("SomeClass"),
                             extends: None,
-                            members: vec![]
-                        })
+                            members: vec![],
+                        }),
                     },
                     DecoratedDef {
                         annotations: vec![],
@@ -1306,8 +1057,8 @@ mod tests {
                         visibility: Visibility::Public,
                         definition: ModuleMember::ModuleDef(ModuleDef {
                             name: Ident("ModuleB"),
-                            members: vec![]
-                        })
+                            members: vec![],
+                        }),
                     },
                 ]
             }

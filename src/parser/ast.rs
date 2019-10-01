@@ -2,36 +2,36 @@ use std::collections::HashMap;
 
 pub type Body<'a> = Vec<Stmt<'a>>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Ident<'a>(pub &'a str);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Path<'a>(pub Vec<Ident<'a>>);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
     Private,
     Public,
     Protected,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct InitializableDef<'a> {
     pub name: Ident<'a>,
     pub init: Option<Expr<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ClassDef<'a> {
     pub name: Ident<'a>,
     pub extends: Option<Path<'a>>,
     pub members: Vec<DecoratedDef<'a, ClassMember<'a>>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EnumDef<'a>(pub Vec<InitializableDef<'a>>);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Assignation<'a> {
     pub name: Ident<'a>,
     pub value: Expr<'a>,
@@ -39,40 +39,40 @@ pub struct Assignation<'a> {
 
 pub type VarDef<'a> = InitializableDef<'a>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ConstDef<'a> {
     pub name: Ident<'a>,
     pub init: Expr<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FunctionDef<'a> {
     pub name: Ident<'a>,
     pub params: Vec<Ident<'a>>,
     pub body: StmtBlock<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CallExpr<'a> {
     pub name: Ident<'a>,
     pub arguments: Vec<Expr<'a>>,
     pub then: Option<Box<CallExpr<'a>>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct InvokeExpr<'a> {
     pub receiver: Expr<'a>,
     pub call: CallExpr<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Ternary<'a> {
     pub condition: Expr<'a>,
     pub true_branch: Expr<'a>,
     pub false_branch: Expr<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ModuleMember<'a> {
     VarDef(VarDef<'a>),
     ConstDef(ConstDef<'a>),
@@ -82,35 +82,35 @@ pub enum ModuleMember<'a> {
     ModuleDef(ModuleDef<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ModuleDef<'a> {
     pub name: Ident<'a>,
     pub members: Vec<DecoratedDef<'a, ModuleMember<'a>>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Using<'a> {
     pub path: Path<'a>,
     pub alias: Option<Ident<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NewObject<'a> {
     pub path: Path<'a>,
     pub args: Vec<Expr<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Group<'a>(pub Expr<'a>);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct IfStmt<'a> {
     pub cond: Expr<'a>,
     pub true_branch: Stmt<'a>,
     pub false_branch: Option<Stmt<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ForStmt<'a> {
     pub init: Option<Stmt<'a>>,
     pub cond: Option<Expr<'a>>,
@@ -118,13 +118,13 @@ pub struct ForStmt<'a> {
     pub body: Stmt<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct WhileStmt<'a> {
     pub cond: Expr<'a>,
     pub body: Stmt<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DoWhileStmt<'a> {
     pub cond: Expr<'a>,
     pub body: StmtBlock<'a>,
@@ -132,7 +132,7 @@ pub struct DoWhileStmt<'a> {
 
 pub type StmtBlock<'a> = Vec<Stmt<'a>>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Literal<'a> {
     Boolean(bool),
     Character(char),
@@ -141,45 +141,61 @@ pub enum Literal<'a> {
     Symbol(Ident<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum CaseLabel<'a> {
     Literal(Literal<'a>),
     InstanceOf(Path<'a>),
     Default,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CaseBlock<'a> {
     pub labels: Vec<CaseLabel<'a>>,
     pub statements: StmtBlock<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum BinOp {
+    Div,
+    Mul,
+    Add,
+    Sub,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    Distinct,
+    And,
+    Or,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct SwitchStmt<'a> {
     pub cond: Expr<'a>,
     pub case_blocks: Vec<CaseBlock<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum CatchGuard<'a> {
     Variable(Ident<'a>),
     InstanceOf(Ident<'a>, Path<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CatchStmt<'a> {
     pub guard: CatchGuard<'a>,
     pub body: StmtBlock<'a>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct TryStmt<'a> {
     pub body: StmtBlock<'a>,
     pub catch_body: Vec<CatchStmt<'a>>,
     pub finally_body: Option<StmtBlock<'a>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Stmt<'a> {
     Break,
     Assignation(Assignation<'a>),
@@ -199,12 +215,21 @@ pub enum Stmt<'a> {
     StmtBlock(StmtBlock<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum PrefixOp {
+    Not,
+    Plus,
+    Minus,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr<'a> {
+    PrefixOp(PrefixOp, Box<Expr<'a>>),
     Null,
     Me,
     Ident(Ident<'a>),
     Literal(Literal<'a>),
+    BinOp(BinOp, Box<(Expr<'a>, Expr<'a>)>),
     Assignation(Box<Assignation<'a>>),
     Ternary(Box<Ternary<'a>>),
     Call(CallExpr<'a>),
@@ -216,13 +241,13 @@ pub enum Expr<'a> {
     NewObject(NewObject<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Scope {
     Instance,
     Static,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DecoratedDef<'a, T: 'a> {
     pub annotations: Vec<Ident<'a>>,
     pub scope: Scope,
@@ -230,7 +255,7 @@ pub struct DecoratedDef<'a, T: 'a> {
     pub definition: T,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ClassMember<'a> {
     VarDef(VarDef<'a>),
     ConstDef(ConstDef<'a>),
@@ -238,7 +263,7 @@ pub enum ClassMember<'a> {
     EnumDef(EnumDef<'a>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct RootModuleDef<'a> {
     pub members: Vec<DecoratedDef<'a, ModuleMember<'a>>>,
 }
