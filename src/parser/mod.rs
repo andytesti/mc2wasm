@@ -3,8 +3,8 @@ use std::result::Result::*;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
-use nom::combinator::{map, map_opt, map_parser, map_res, opt};
-use nom::error::ErrorKind;
+use nom::combinator::{cut, map, map_opt, map_parser, map_res, opt};
+use nom::error::{context, ErrorKind};
 use nom::multi::{many0, many1, separated_list};
 use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
 use nom::Err;
@@ -12,7 +12,7 @@ use nom::IResult;
 
 use crate::lexer::token::{Token, Tokens};
 use crate::parser::ast::{
-    Assignation, CallExpr, CaseBlock, CaseLabel, CatchGuard, CatchStmt, ClassDef, ClassMember,
+    Assignment, CallExpr, CaseBlock, CaseLabel, CatchGuard, CatchStmt, ClassDef, ClassMember,
     ConstDef, DecoratedDef, DoWhileStmt, EnumDef, Expr, ForStmt, FunctionDef, Group, Ident, IfStmt,
     InitializableDef, InvokeExpr, Literal, ModuleDef, ModuleMember, NewObject, Path, RootModuleDef,
     Scope, Stmt, StmtBlock, SwitchStmt, TryStmt, Using, VarDef, Visibility, WhileStmt,
@@ -104,17 +104,6 @@ fn const_def(i: Input) -> Result<ConstDef> {
     )(i)
 }
 
-fn assignation(i: Input) -> Result<Assignation> {
-    map(
-        separated_pair(ident, tag(Token::Assign), expr),
-        |(name, value)| Assignation { name, value },
-    )(i)
-}
-
-fn assignation_stmt(i: Input) -> Result<Stmt> {
-    map(assignation, Stmt::Assignation)(i)
-}
-
 fn call_stmt(i: Input) -> Result<Stmt> {
     map(call, Stmt::Call)(i)
 }
@@ -127,14 +116,26 @@ fn break_stmt(i: Input) -> Result<Stmt> {
     map(tag(Token::Break), |_| Stmt::Break)(i)
 }
 
+fn expr_stmt(i: Input) -> Result<Stmt> {
+    map_opt(expr, |e| {
+        println!("expr = {:?}", e);
+        match e {
+            Expr::Invoke(i) => Some(Stmt::Invoke(*i)),
+            Expr::Call(c) => Some(Stmt::Call(c)),
+            Expr::Assignment(a) => Some(Stmt::Assignment(*a)),
+            // TODO add specific failure
+            _ => None,
+        }
+    })(i)
+}
+
 fn terminal_stmt(i: Input) -> Result<Stmt> {
     alt((
         break_stmt,
-        assignation_stmt,
         var_def_stmt,
-        call_stmt,
         return_stmt,
         do_while_stmt,
+        expr_stmt,
     ))(i)
 }
 
@@ -217,8 +218,8 @@ fn if_stmt(i: Input) -> Result<Stmt> {
         |(cond, true_branch, false_branch)| {
             Stmt::IfStmt(Box::new(IfStmt {
                 cond,
-                true_branch,
-                false_branch,
+                then_branch: true_branch,
+                else_branch: false_branch,
             }))
         },
     )(i)
@@ -423,6 +424,7 @@ mod tests {
     use crate::lexer::Lexer;
 
     use super::*;
+    use crate::parser::ast::BinOp;
 
     #[test]
     fn parse_using() {
@@ -518,6 +520,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_if_stmt() {
+        let def = r#"
+        if(x > 10) {
+            return 5;
+        }
+        "#;
+
+        let (_, token_input) = Lexer::tokenize(def).unwrap();
+        let tokens = Tokens::new(&token_input);
+        let (_, lit) = stmt(tokens).unwrap();
+
+        assert_eq!(
+            lit,
+            Stmt::IfStmt(Box::new(IfStmt {
+                cond: Expr::BinOp(
+                    BinOp::Greater,
+                    Box::new((Expr::Ident(Ident("x")), Expr::Literal(Literal::Integer(10))))
+                ),
+                then_branch: Stmt::StmtBlock(vec![Stmt::Return(Expr::Literal(Literal::Integer(
+                    5
+                )))]),
+                else_branch: None
+            }))
+        )
+    }
+
+    #[test]
     fn parse_switch_stmt() {
         let def = r#"
         switch(x) {
@@ -548,7 +577,6 @@ mod tests {
                             Stmt::Call(CallExpr {
                                 name: Ident("sayHello"),
                                 arguments: vec![Expr::Literal(Literal::String("Mike"))],
-                                then: None,
                             }),
                             Stmt::Break
                         ],
@@ -566,7 +594,6 @@ mod tests {
                             Stmt::Call(CallExpr {
                                 name: Ident("sayBye"),
                                 arguments: vec![Expr::Literal(Literal::String("Ralf"))],
-                                then: None,
                             }),
                             Stmt::Break
                         ],
@@ -576,7 +603,6 @@ mod tests {
                         statements: vec![Stmt::Call(CallExpr {
                             name: Ident("print"),
                             arguments: vec![Expr::Literal(Literal::String("Nothing to do"))],
-                            then: None,
                         })],
                     }
                 ],

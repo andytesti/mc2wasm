@@ -4,7 +4,8 @@ use crate::parser::ast::*;
 use crate::parser::{between_brackets, between_parens, between_squares};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::{map, opt};
+use nom::combinator::{cut, map, map_opt, map_res, opt};
+use nom::error::{context, ErrorKind};
 use nom::multi::{fold_many0, separated_list};
 use nom::sequence::{pair, preceded, separated_pair};
 
@@ -64,7 +65,6 @@ pub fn call(i: Input) -> Result<CallExpr> {
     map(pair(ident, args), |(name, arguments)| CallExpr {
         name,
         arguments,
-        then: None,
     })(i)
 }
 
@@ -121,12 +121,42 @@ fn node(i: Input) -> Result<Expr> {
     ))(i)
 }
 
+fn access(i: Input) -> Result<Expr> {
+    enum Access<'a> {
+        Index(Expr<'a>),
+        Select(Ident<'a>),
+        Invoke(Ident<'a>, Vec<Expr<'a>>),
+    }
+
+    let index = map(between_squares(expr), Access::Index);
+    let select = map(preceded(tag(Token::Dot), ident), Access::Select);
+    let invoke = map(
+        preceded(tag(Token::Dot), pair(ident, args)),
+        |(name, args)| Access::Invoke(name, args),
+    );
+
+    let (i, init) = node(i)?;
+    fold_many0(
+        alt((index, invoke, select)),
+        init,
+        |receiver, operation| match operation {
+            Access::Index(offset) => Expr::Index(Box::new(Index { receiver, offset })),
+            Access::Select(field) => Expr::Select(Box::new(Select { receiver, field })),
+            Access::Invoke(method, arguments) => Expr::Invoke(Box::new(InvokeExpr {
+                receiver,
+                method,
+                arguments,
+            })),
+        },
+    )(i)
+}
+
 fn unary(i: Input) -> Result<Expr> {
     let not = map(tag(Token::Exclamation), |_| PrefixOp::Not);
     let plus = map(tag(Token::Add), |_| PrefixOp::Plus);
     let minus = map(tag(Token::Sub), |_| PrefixOp::Minus);
 
-    map(pair(opt(alt((not, plus, minus))), node), |(op, value)| {
+    map(pair(opt(alt((not, plus, minus))), access), |(op, value)| {
         if let Some(op) = op {
             Expr::PrefixOp(op, Box::new(value))
         } else {
@@ -202,11 +232,11 @@ fn ternary(i: Input) -> Result<Expr> {
         separated_pair(expr, tag(Token::Colon), expr),
     );
     map(pair(logical_or, opt(branches)), |(condition, branches)| {
-        if let Some((true_branch, false_branch)) = branches {
+        if let Some((then_branch, else_branch)) = branches {
             Expr::Ternary(Box::new(Ternary {
                 condition,
-                true_branch,
-                false_branch,
+                then_branch,
+                else_branch,
             }))
         } else {
             condition
@@ -214,51 +244,79 @@ fn ternary(i: Input) -> Result<Expr> {
     })(i)
 }
 
+pub fn assignment(i: Input) -> Result<Expr> {
+    let simple = map(tag(Token::Assign), |_| AssignmentOp::Simple);
+    let add = map(tag(Token::AddAssign), |_| AssignmentOp::Add);
+    let sub = map(tag(Token::SubAssign), |_| AssignmentOp::Sub);
+    let mul = map(tag(Token::MulAssign), |_| AssignmentOp::Mul);
+    let div = map(tag(Token::DivAssign), |_| AssignmentOp::Div);
+    let sleft = map(tag(Token::SLeftAssign), |_| AssignmentOp::SLeft);
+    let sright = map(tag(Token::SRightAssign), |_| AssignmentOp::SRight);
+
+    let operator = alt((simple, add, sub, mul, div, sleft, sright));
+    map_opt(
+        pair(ternary, opt(pair(operator, expr))),
+        |(assignee, right)| {
+            if let Some((operator, value)) = right {
+                let assignee = match assignee {
+                    Expr::Ident(var) => Assignee::Var(var),
+                    Expr::Index(i) => Assignee::Index(*i),
+                    Expr::Select(s) => Assignee::Select(*s),
+                    // TODO add specific failure
+                    _ => None?,
+                };
+                Some(Expr::Assignment(Box::new(Assignment {
+                    operator,
+                    assignee,
+                    value,
+                })))
+            } else {
+                Some(assignee)
+            }
+        },
+    )(i)
+}
+
 pub fn expr(i: Input) -> Result<Expr> {
-    ternary(i)
+    assignment(i)
 }
 
 mod tests {
     use super::*;
-    use crate::lexer::token::Tokens;
-    use crate::lexer::Lexer;
-    use nom::InputLength;
+
+    macro_rules! assert_parsing {
+        ($parser:ident, $source:expr, $expected:expr) => {{
+            let (_, token_input) = crate::lexer::Lexer::tokenize($source).unwrap();
+            let tokens = crate::lexer::token::Tokens::new(&token_input);
+            let (_, actual) = $parser(tokens).unwrap();
+
+            assert_eq!(actual, $expected);
+        }};
+
+        ($source:expr, $expected:expr) => {
+            assert_parsing!(expr, $source, $expected)
+        };
+    }
 
     #[test]
     fn parse_ident() {
-        let (_, token_input) = Lexer::tokenize("_identifier1").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(lit, Expr::Ident(Ident("_identifier1")))
+        assert_parsing!("_identifier1", Expr::Ident(Ident("_identifier1")))
     }
 
     #[test]
     fn parse_integer_literal() {
-        let token_input = vec![Token::IntLiteral(12)];
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(lit, Expr::Literal(Literal::Integer(12)))
+        assert_parsing!("12", Expr::Literal(Literal::Integer(12)))
     }
 
     #[test]
     fn parse_path() {
-        let token_input = vec![Token::Ident("a"), Token::Dot, Token::Ident("b")];
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = path(tokens).unwrap();
-
-        assert_eq!(lit, Path(vec![Ident("a"), Ident("b")]))
+        assert_parsing!(path, "a.b", Path(vec![Ident("a"), Ident("b")]))
     }
 
     #[test]
     fn parse_new_object() {
-        let (_, token_input) = Lexer::tokenize("new Lang.Object(12)").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(
-            lit,
+        assert_parsing!(
+            "new Lang.Object(12)",
             Expr::NewObject(NewObject {
                 path: Path(vec![Ident("Lang"), Ident("Object")]),
                 args: vec![Expr::Literal(Literal::Integer(12))],
@@ -268,20 +326,13 @@ mod tests {
 
     #[test]
     fn parse_new_dictionary_expr() {
-        let (_, token_input) = Lexer::tokenize(
+        assert_parsing!(
             r#"
-        {
-            :x => "hello",
-            12 => false
-        }
-        "#,
-        )
-        .unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(
-            lit,
+            {
+                :x => "hello",
+                12 => false
+            }
+            "#,
             Expr::NewDictionary(vec![
                 (
                     Expr::Literal(Literal::Symbol(Ident("x"))),
@@ -296,13 +347,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_multiplicative() {
-        let (_, token_input) = Lexer::tokenize("-a * 12 / c").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
+    fn parse_index() {
+        assert_parsing!(
+            "a[10]",
+            Expr::Index(Box::new(Index {
+                receiver: Expr::Ident(Ident("a")),
+                offset: Expr::Literal(Literal::Integer(10))
+            }))
+        )
+    }
 
-        assert_eq!(
-            lit,
+    #[test]
+    fn parse_double_index() {
+        assert_parsing!(
+            "a[10][20]",
+            Expr::Index(Box::new(Index {
+                receiver: Expr::Index(Box::new(Index {
+                    receiver: Expr::Ident(Ident("a")),
+                    offset: Expr::Literal(Literal::Integer(10))
+                })),
+                offset: Expr::Literal(Literal::Integer(20))
+            }))
+        )
+    }
+
+    #[test]
+    fn parse_select() {
+        assert_parsing!(
+            "a.b.c(10).d(11)",
+            Expr::Invoke(Box::new(InvokeExpr {
+                receiver: Expr::Invoke(Box::new(InvokeExpr {
+                    receiver: Expr::Select(Box::new(Select {
+                        receiver: Expr::Ident(Ident("a")),
+                        field: Ident("b")
+                    })),
+                    method: Ident("c"),
+                    arguments: vec![Expr::Literal(Literal::Integer(10))]
+                })),
+                method: Ident("d"),
+                arguments: vec![Expr::Literal(Literal::Integer(11))]
+            }))
+        )
+    }
+
+    #[test]
+    fn parse_multiplicative() {
+        assert_parsing!(
+            "-a * 12 / c",
             Expr::BinOp(
                 BinOp::Div,
                 Box::new((
@@ -321,12 +412,8 @@ mod tests {
 
     #[test]
     fn parse_additive() {
-        let (_, token_input) = Lexer::tokenize("a + b * -c - 4 / d").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(
-            lit,
+        assert_parsing!(
+            "a + b * -c - 4 / d",
             Expr::BinOp(
                 BinOp::Sub,
                 Box::new((
@@ -357,16 +444,24 @@ mod tests {
 
     #[test]
     fn parse_ternary() {
-        let (_, token_input) = Lexer::tokenize("a? b: c").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = expr(tokens).unwrap();
-
-        assert_eq!(
-            lit,
+        assert_parsing!(
+            "a? b: c",
             Expr::Ternary(Box::new(Ternary {
                 condition: Expr::Ident(Ident("a")),
-                true_branch: Expr::Ident(Ident("b")),
-                false_branch: Expr::Ident(Ident("c"))
+                then_branch: Expr::Ident(Ident("b")),
+                else_branch: Expr::Ident(Ident("c"))
+            }))
+        )
+    }
+
+    #[test]
+    fn parse_assign() {
+        assert_parsing!(
+            "a = b[10] += c.d -= e",
+            Expr::Ternary(Box::new(Ternary {
+                condition: Expr::Ident(Ident("a")),
+                then_branch: Expr::Ident(Ident("b")),
+                else_branch: Expr::Ident(Ident("c"))
             }))
         )
     }

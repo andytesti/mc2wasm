@@ -32,8 +32,20 @@ pub struct ClassDef<'a> {
 pub struct EnumDef<'a>(pub Vec<InitializableDef<'a>>);
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Assignation<'a> {
-    pub name: Ident<'a>,
+pub enum AssignmentOp {
+    Simple,
+    Add,
+    Sub,
+    Div,
+    Mul,
+    SLeft,
+    SRight,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Assignment<'a> {
+    pub operator: AssignmentOp,
+    pub assignee: Assignee<'a>,
     pub value: Expr<'a>,
 }
 
@@ -56,20 +68,20 @@ pub struct FunctionDef<'a> {
 pub struct CallExpr<'a> {
     pub name: Ident<'a>,
     pub arguments: Vec<Expr<'a>>,
-    pub then: Option<Box<CallExpr<'a>>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct InvokeExpr<'a> {
     pub receiver: Expr<'a>,
-    pub call: CallExpr<'a>,
+    pub method: Ident<'a>,
+    pub arguments: Vec<Expr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Ternary<'a> {
     pub condition: Expr<'a>,
-    pub true_branch: Expr<'a>,
-    pub false_branch: Expr<'a>,
+    pub then_branch: Expr<'a>,
+    pub else_branch: Expr<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -106,8 +118,8 @@ pub struct Group<'a>(pub Expr<'a>);
 #[derive(Debug, PartialEq, Clone)]
 pub struct IfStmt<'a> {
     pub cond: Expr<'a>,
-    pub true_branch: Stmt<'a>,
-    pub false_branch: Option<Stmt<'a>>,
+    pub then_branch: Stmt<'a>,
+    pub else_branch: Option<Stmt<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -198,7 +210,7 @@ pub struct TryStmt<'a> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Stmt<'a> {
     Break,
-    Assignation(Assignation<'a>),
+    Assignment(Assignment<'a>),
     Call(CallExpr<'a>),
     Invoke(InvokeExpr<'a>),
     Using(Using<'a>),
@@ -223,6 +235,25 @@ pub enum PrefixOp {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct Index<'a> {
+    pub receiver: Expr<'a>,
+    pub offset: Expr<'a>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Select<'a> {
+    pub receiver: Expr<'a>,
+    pub field: Ident<'a>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Assignee<'a> {
+    Var(Ident<'a>),
+    Index(Index<'a>),
+    Select(Select<'a>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr<'a> {
     PrefixOp(PrefixOp, Box<Expr<'a>>),
     Null,
@@ -230,10 +261,12 @@ pub enum Expr<'a> {
     Ident(Ident<'a>),
     Literal(Literal<'a>),
     BinOp(BinOp, Box<(Expr<'a>, Expr<'a>)>),
-    Assignation(Box<Assignation<'a>>),
+    Assignment(Box<Assignment<'a>>),
     Ternary(Box<Ternary<'a>>),
+    Select(Box<Select<'a>>),
     Call(CallExpr<'a>),
     Invoke(Box<InvokeExpr<'a>>),
+    Index(Box<Index<'a>>),
     Group(Box<Group<'a>>),
     NewArray(Vec<Expr<'a>>),
     NewEmptyArray(Box<Expr<'a>>),
