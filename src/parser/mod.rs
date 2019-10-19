@@ -11,13 +11,8 @@ use nom::Err;
 use nom::IResult;
 
 use crate::lexer::token::{Token, Tokens};
-use crate::parser::ast::{
-    Assignment, CallExpr, CaseBlock, CaseLabel, CatchGuard, CatchStmt, ClassDef, ClassMember,
-    ConstDef, DecoratedDef, DoWhileStmt, EnumDef, Expr, ForStmt, FunctionDef, Group, Ident, IfStmt,
-    InitializableDef, InvokeExpr, Literal, ModuleDef, ModuleMember, NewObject, Path, RootModuleDef,
-    Scope, Stmt, StmtBlock, SwitchStmt, TryStmt, Using, VarDef, Visibility, WhileStmt,
-};
-use crate::parser::expression::{call, expr, group, ident, literal, path, symbol_literal};
+use crate::parser::ast::*;
+use crate::parser::expression::{call, expr, group, literal, symbol, symbol_ref_lit};
 
 pub mod ast;
 mod expression;
@@ -59,48 +54,79 @@ fn between_brackets<'a, T: 'a>(
     between(Token::OpenBracket, term, Token::CloseBracket)
 }
 
-fn using(i: Input) -> Result<Using> {
+// usingdef
+//    : 'using' usingModule=moduleId ('as' name=symbol)? ';'
+fn usingdef(i: Input) -> Result<UsingDef> {
     map(
-        preceded(
+        delimited(
             tag(Token::Using),
-            pair(path, opt(preceded(tag(Token::As), ident))),
+            pair(module_id, opt(preceded(tag(Token::As), symbol))),
+            tag(Token::Semicolon),
         ),
-        |(path, alias)| Using { path, alias },
+        |(using_module, name)| UsingDef { using_module, name },
     )(i)
+}
+
+// moduleId
+//    : symbol
+//    | moduleId '.' symbol
+pub fn module_id(i: Input) -> Result<ModuleId> {
+    map(separated_list(tag(Token::Dot), symbol), ModuleId)(i)
 }
 
 fn return_stmt(i: Input) -> Result<Stmt> {
     map(preceded(tag(Token::Return), expr), Stmt::Return)(i)
 }
 
-fn initializable_def(i: Input) -> Result<InitializableDef> {
+// enumDeclaration
+//    : id=symbol  ( '=' initializer=variabledefInitializers)?
+fn enum_declaration(i: Input) -> Result<EnumDeclaration> {
     map(
-        pair(ident, opt(preceded(tag(Token::Assign), expr))),
-        |(name, init)| InitializableDef { name, init },
+        pair(symbol, opt(preceded(tag(Token::Assign), expr))),
+        |(id, initializer)| EnumDeclaration { id, initializer },
     )(i)
 }
 
-fn enum_def(i: Input) -> Result<EnumDef> {
+//enumdef
+//    : EnumToken '{' enumDeclaration (',' enumDeclaration)* ','? '}'
+fn enumdef(i: Input) -> Result<EnumDef> {
     map(
         preceded(
             tag(Token::Enum),
-            between_brackets(separated_list(tag(Token::Comma), initializable_def)),
+            between_brackets(separated_list(tag(Token::Comma), enum_declaration)),
         ),
         EnumDef,
     )(i)
 }
 
-fn var_def(i: Input) -> Result<VarDef> {
-    preceded(tag(Token::Var), initializable_def)(i)
+// variabledefPair
+//    : id=symbol ( '=' initializer=variabledefInitializers )?
+fn variabledef_pair(i: Input) -> Result<VariableDefPair> {
+    map(
+        pair(symbol, opt(preceded(tag(Token::Assign), expr))),
+        |(name, value)| VariableDefPair { name, value },
+    )(i)
 }
 
-fn const_def(i: Input) -> Result<ConstDef> {
+// variabledef
+//    : type=VarToken variabledefPair ( ',' variabledefPair ) * ';'
+//    | type=ConstToken variabledefPair ( ',' variabledefPair ) * ';'
+//    ;
+fn variabledef(i: Input) -> Result<VariableDef> {
+    let variable_kind = alt((
+        map(tag(Token::Var), |_| VariableKind::Var),
+        map(tag(Token::Const), |_| VariableKind::Const),
+    ));
+
     map(
-        preceded(
-            tag(Token::Const),
-            separated_pair(ident, tag(Token::Assign), expr),
+        terminated(
+            pair(
+                variable_kind,
+                separated_list(tag(Token::Comma), variabledef_pair),
+            ),
+            tag(Token::Semicolon),
         ),
-        |(name, init)| ConstDef { name, init },
+        |(kind, pairs)| VariableDef { kind, pairs },
     )(i)
 }
 
@@ -109,7 +135,7 @@ fn call_stmt(i: Input) -> Result<Stmt> {
 }
 
 fn var_def_stmt(i: Input) -> Result<Stmt> {
-    map(var_def, Stmt::VarDef)(i)
+    map(variabledef, Stmt::VarDef)(i)
 }
 
 fn break_stmt(i: Input) -> Result<Stmt> {
@@ -141,7 +167,7 @@ fn terminal_stmt(i: Input) -> Result<Stmt> {
 
 fn while_stmt(i: Input) -> Result<Stmt> {
     map(
-        preceded(tag(Token::While), pair(between_parens(expr), stmt)),
+        preceded(tag(Token::While), pair(between_parens(expr), statement)),
         |(cond, body)| Stmt::WhileStmt(Box::new(WhileStmt { cond, body })),
     )(i)
 }
@@ -151,7 +177,7 @@ fn do_while_stmt(i: Input) -> Result<Stmt> {
         preceded(
             tag(Token::Do),
             pair(
-                stmt_block,
+                code_block,
                 preceded(tag(Token::While), between_parens(expr)),
             ),
         ),
@@ -169,7 +195,7 @@ fn for_stmt(i: Input) -> Result<Stmt> {
                     semicolon_terminated(opt(expr)),
                     opt(terminal_stmt),
                 ))),
-                stmt,
+                statement,
             ),
         ),
         |((init, cond, inc), body)| {
@@ -185,8 +211,7 @@ fn for_stmt(i: Input) -> Result<Stmt> {
 
 fn structured_stmt(i: Input) -> Result<Stmt> {
     alt((
-        stmt_block_stmt,
-        if_stmt,
+        map(if_statement, Stmt::IfStmt),
         for_stmt,
         while_stmt,
         switch_stmt,
@@ -195,32 +220,47 @@ fn structured_stmt(i: Input) -> Result<Stmt> {
     ))(i)
 }
 
-fn stmt(i: Input) -> Result<Stmt> {
+// statementSequenceEntry
+//    : statementSequence?
+//    | codeBlock
+
+fn statement(i: Input) -> Result<Stmt> {
     let line_stmt = semicolon_terminated(terminal_stmt);
     alt((line_stmt, structured_stmt))(i)
 }
 
-fn stmt_block(i: Input) -> Result<StmtBlock> {
-    between_brackets(many0(stmt))(i)
+//statementSequence
+//    : statement statementSequence?
+//    | codeBlock statementSequence?
+fn statement_sequence(i: Input) -> Result<CodeBlock> {
+    many1(statement)(i)
 }
 
-fn stmt_block_stmt(i: Input) -> Result<Stmt> {
-    map(stmt_block, Stmt::StmtBlock)(i)
+//codeBlock
+//    :  '{' '}'
+//    | '{' statementSequence '}'
+fn code_block(i: Input) -> Result<CodeBlock> {
+    between_brackets(statement_sequence)(i)
 }
 
-fn if_stmt(i: Input) -> Result<Stmt> {
+// ifStatement
+//    : IfToken '(' expression ')'
+//        ifCase = codeBlock ( ElseToken ( elseIfCase=ifStatement | elseCase=codeBlock ) )?
+fn if_statement(i: Input) -> Result<IfStatement> {
+    let else_case = alt((
+        map(if_statement, |stmt| vec![Stmt::IfStmt(stmt)]),
+        code_block,
+    ));
     map(
         tuple((
             preceded(tag(Token::If), group),
-            stmt,
-            opt(preceded(tag(Token::Else), stmt)),
+            code_block,
+            opt(preceded(tag(Token::Else), else_case)),
         )),
-        |(cond, true_branch, false_branch)| {
-            Stmt::IfStmt(Box::new(IfStmt {
-                cond,
-                then_branch: true_branch,
-                else_branch: false_branch,
-            }))
+        |(cond, true_branch, false_branch)| IfStatement {
+            cond,
+            true_branch,
+            false_branch: false_branch.unwrap_or_default(),
         },
     )(i)
 }
@@ -230,7 +270,7 @@ fn case_label(i: Input) -> Result<CaseLabel> {
         alt((
             map(preceded(tag(Token::Case), literal), CaseLabel::Literal),
             map(
-                preceded(pair(tag(Token::Case), tag(Token::InstanceOf)), path),
+                preceded(pair(tag(Token::Case), tag(Token::InstanceOf)), module_id),
                 CaseLabel::InstanceOf,
             ),
             map(tag(Token::Default), |_| CaseLabel::Default),
@@ -241,7 +281,7 @@ fn case_label(i: Input) -> Result<CaseLabel> {
 
 fn case_block(i: Input) -> Result<CaseBlock> {
     map(
-        pair(many1(case_label), many1(stmt)),
+        pair(many1(case_label), many1(statement)),
         |(labels, statements)| CaseBlock { labels, statements },
     )(i)
 }
@@ -256,23 +296,28 @@ fn switch_stmt(i: Input) -> Result<Stmt> {
     )(i)
 }
 
-fn params(i: Input) -> Result<Vec<Ident>> {
-    between_parens(separated_list(tag(Token::Comma), ident))(i)
+// paramDecl
+//    : '(' ')'
+//    | '('  Id ( ',' Id )*  ')'
+fn param_decl(i: Input) -> Result<Vec<Id>> {
+    between_parens(separated_list(tag(Token::Comma), symbol))(i)
 }
 
-fn function_def(i: Input) -> Result<FunctionDef> {
+// functiondef
+//    : FunctionToken id=symbol paramDecl (codeBlock | ';')
+fn functiondef(i: Input) -> Result<FunctionDef> {
     map(
-        tuple((preceded(tag(Token::Function), ident), params, stmt_block)),
-        |(name, params, body)| FunctionDef { name, params, body },
+        tuple((
+            preceded(tag(Token::Function), symbol),
+            param_decl,
+            code_block,
+        )),
+        |(name, params, body)| FunctionDef {
+            id: name,
+            params,
+            body,
+        },
     )(i)
-}
-
-fn enum_member_def(i: Input) -> Result<ClassMember> {
-    map(enum_def, ClassMember::EnumDef)(i)
-}
-
-fn function_member_def(i: Input) -> Result<ClassMember> {
-    map(function_def, ClassMember::FunctionDef)(i)
 }
 
 fn static_scope(i: Input) -> Result<Scope> {
@@ -307,16 +352,8 @@ fn modifiers(i: Input) -> Result<(Scope, Visibility)> {
     )(i)
 }
 
-fn var_member_def(i: Input) -> Result<ClassMember> {
-    map(semicolon_terminated(var_def), ClassMember::VarDef)(i)
-}
-
-fn const_member_def(i: Input) -> Result<ClassMember> {
-    map(semicolon_terminated(const_def), ClassMember::ConstDef)(i)
-}
-
-fn annotations(i: Input) -> Result<Vec<Ident>> {
-    many0(between_parens(symbol_literal))(i)
+fn annotations(i: Input) -> Result<Vec<Id>> {
+    many0(between_parens(symbol_ref_lit))(i)
 }
 
 fn decorated_def<'a, T: 'a>(
@@ -333,22 +370,58 @@ fn decorated_def<'a, T: 'a>(
     )
 }
 
-fn class_def(i: Input) -> Result<ClassDef> {
-    let class_member_def = decorated_def(alt((
-        var_member_def,
-        const_member_def,
-        function_member_def,
-        enum_member_def,
-    )));
+// declarationFlags
+//    : 'hidden'
+//    | 'static'
+//    | 'native'
+//    | 'public'
+//    | 'private'
+//    | 'protected'
+fn declaration_flags(i: Input) -> Result<DeclarationFlag> {
+    alt((
+        map(tag(Token::Hidden), |_| DeclarationFlag::Hidden),
+        map(tag(Token::Static), |_| DeclarationFlag::Static),
+        map(tag(Token::Native), |_| DeclarationFlag::Native),
+        map(tag(Token::Public), |_| DeclarationFlag::Public),
+        map(tag(Token::Private), |_| DeclarationFlag::Private),
+        map(tag(Token::Protected), |_| DeclarationFlag::Protected),
+    ))(i)
+}
+
+// classDeclaration
+//    : annotations? flags=declarationFlags* (classdef | functiondef | variabledef | enumdef )
+//    | usingdef
+fn class_declaration(i: Input) -> Result<ClassDeclaration> {
+    let class_member = alt((
+        map(classdef, ClassMember::ClassDef),
+        map(functiondef, ClassMember::FunctionDef),
+        map(variabledef, ClassMember::VariableDef),
+        map(enumdef, ClassMember::EnumDef),
+    ));
+    let decorated_class_declaration = map(
+        tuple((annotations, many0(declaration_flags), class_member)),
+        |(annotations, flags, def)| ClassDeclaration::ClassMember {
+            annotations,
+            flags,
+            def,
+        },
+    );
+    let usingdef_class_declaration = map(usingdef, ClassDeclaration::UsingDef);
+    alt((decorated_class_declaration, usingdef_class_declaration))(i)
+}
+
+// classdef
+//    : ClassToken id=symbol ( 'extends' extendsValue=moduleId )? '{' classDeclaration* '}'
+fn classdef(i: Input) -> Result<ClassDef> {
     map(
         tuple((
-            preceded(tag(Token::Class), ident),
-            opt(preceded(tag(Token::Extends), path)),
-            between_brackets(many0(class_member_def)),
+            preceded(tag(Token::Class), symbol),
+            opt(preceded(tag(Token::Extends), module_id)),
+            between_brackets(many0(class_declaration)),
         )),
-        |(name, extends, members)| ClassDef {
-            name,
-            extends,
+        |(id, extends_value, members)| ClassDef {
+            id,
+            extends_value,
             members,
         },
     )(i)
@@ -356,27 +429,19 @@ fn class_def(i: Input) -> Result<ClassDef> {
 
 fn module_member(i: Input) -> Result<DecoratedDef<ModuleMember>> {
     let module_def = decorated_def(map(module_def, ModuleMember::ModuleDef));
-    let class_def = decorated_def(map(class_def, ModuleMember::ClassDef));
-    let enum_def = decorated_def(map(enum_def, ModuleMember::EnumDef));
-    let const_def = semicolon_terminated(decorated_def(map(const_def, ModuleMember::ConstDef)));
-    let var_def = semicolon_terminated(decorated_def(map(var_def, ModuleMember::VarDef)));
-    let function_def = decorated_def(map(function_def, ModuleMember::FunctionDef));
+    let class_def = decorated_def(map(classdef, ModuleMember::ClassDef));
+    let enum_def = decorated_def(map(enumdef, ModuleMember::EnumDef));
+    let var_def = semicolon_terminated(decorated_def(map(variabledef, ModuleMember::VarDef)));
+    let function_def = decorated_def(map(functiondef, ModuleMember::FunctionDef));
 
-    alt((
-        module_def,
-        class_def,
-        enum_def,
-        const_def,
-        var_def,
-        function_def,
-    ))(i)
+    alt((module_def, class_def, enum_def, var_def, function_def))(i)
 }
 
 fn module_def(i: Input) -> Result<ModuleDef> {
     map(
         preceded(
             tag(Token::Module),
-            pair(ident, between_brackets(many0(module_member))),
+            pair(symbol, between_brackets(many0(module_member))),
         ),
         |(name, members)| ModuleDef { name, members },
     )(i)
@@ -387,14 +452,14 @@ fn root_module_def(i: Input) -> Result<RootModuleDef> {
 }
 
 fn catch_stmt(i: Input) -> Result<CatchStmt> {
-    let variable = map(ident, CatchGuard::Variable);
+    let variable = map(symbol, CatchGuard::Variable);
     let instanceof = map(
-        separated_pair(ident, tag(Token::InstanceOf), path),
+        separated_pair(symbol, tag(Token::InstanceOf), module_id),
         |(var, class)| CatchGuard::InstanceOf(var, class),
     );
     let catch_guard = between_parens(alt((instanceof, variable)));
     map(
-        preceded(tag(Token::Catch), pair(catch_guard, stmt_block)),
+        preceded(tag(Token::Catch), pair(catch_guard, code_block)),
         |(guard, body)| CatchStmt { guard, body },
     )(i)
 }
@@ -404,9 +469,9 @@ fn throw_stmt(i: Input) -> Result<Stmt> {
 }
 
 fn try_stmt(i: Input) -> Result<Stmt> {
-    let try_block = preceded(tag(Token::Try), stmt_block);
+    let try_block = preceded(tag(Token::Try), code_block);
     let catch_block = many0(catch_stmt);
-    let finally_block = opt(preceded(tag(Token::Finally), stmt_block));
+    let finally_block = opt(preceded(tag(Token::Finally), code_block));
 
     map(
         tuple((try_block, catch_block, finally_block)),
@@ -426,34 +491,38 @@ mod tests {
     use super::*;
     use crate::parser::ast::BinOp;
 
+    macro_rules! assert_parsing {
+        ($parser:ident, $source:expr, $expected:expr) => {{
+            let (_, token_input) = crate::lexer::Lexer::tokenize($source).unwrap();
+            let tokens = crate::lexer::token::Tokens::new(&token_input);
+            let (_, actual) = $parser(tokens).unwrap();
+
+            assert_eq!(actual, $expected);
+        }};
+
+        ($source:expr, $expected:expr) => {
+            assert_parsing!(expr, $source, $expected)
+        };
+    }
+
     #[test]
     fn parse_using() {
-        let (_, token_input) = Lexer::tokenize("using a.b").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = using(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Using {
-                path: Path(vec![Ident("a"), Ident("b")]),
-                alias: None,
-            }
-        )
+        let text = "using a.b;";
+        let tree = UsingDef {
+            using_module: ModuleId(vec![("a"), ("b")]),
+            name: None,
+        };
+        assert_parsing!(usingdef, text, tree)
     }
 
     #[test]
     fn parse_using_as() {
-        let (_, token_input) = Lexer::tokenize("using a.b as d").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = using(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Using {
-                path: Path(vec![Ident("a"), Ident("b")]),
-                alias: Some(Ident("d")),
-            }
-        )
+        let text = "using a.b as d;";
+        let tree = UsingDef {
+            using_module: ModuleId(vec!["a", "b"]),
+            name: Some(("d")),
+        };
+        assert_parsing!(usingdef, text, tree)
     }
 
     #[test]
@@ -475,77 +544,129 @@ mod tests {
     }
 
     #[test]
-    fn parse_var_def() {
-        let (_, token_input) = Lexer::tokenize("var a").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = var_def(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            VarDef {
-                name: Ident("a"),
-                init: None,
-            }
-        )
+    fn parse_uninitialized_var() {
+        let text = "var alpha;";
+        let tree = VariableDef {
+            kind: VariableKind::Var,
+            pairs: vec![VariableDefPair {
+                name: "alpha",
+                value: None,
+            }],
+        };
+        assert_parsing!(variabledef, text, tree);
     }
 
     #[test]
-    fn parse_const_def() {
-        let (_, token_input) = Lexer::tokenize("const AGE = 20").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = const_def(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            ConstDef {
-                name: Ident("AGE"),
-                init: Expr::Literal(Literal::Integer(20)),
-            }
-        )
+    fn parse_uninitialized_const() {
+        // Monkey C allows this weirdness
+        let text = "const AGE;";
+        let tree = VariableDef {
+            kind: VariableKind::Const,
+            pairs: vec![VariableDefPair {
+                name: "AGE",
+                value: None,
+            }],
+        };
+        assert_parsing!(variabledef, text, tree);
     }
 
     #[test]
-    fn parse_var_init() {
-        let (_, token_input) = Lexer::tokenize("var a = 12").unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = var_def(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            VarDef {
-                name: Ident("a"),
-                init: Some(Expr::Literal(Literal::Integer(12))),
-            }
-        )
+    fn parse_initialized_var() {
+        let text = "var alpha = 12, beta;";
+        let tree = VariableDef {
+            kind: VariableKind::Var,
+            pairs: vec![
+                VariableDefPair {
+                    name: "alpha",
+                    value: Some(Expr::Literal(Literal::Integer(12))),
+                },
+                VariableDefPair {
+                    name: "beta",
+                    value: None,
+                },
+            ],
+        };
+        assert_parsing!(variabledef, text, tree);
     }
 
     #[test]
-    fn parse_if_stmt() {
-        let def = r#"
-        if(x > 10) {
-            return 5;
-        }
+    fn parse_if_statement() {
+        let text = r#"
+            if (x > 10) {
+                return 5;
+            }
         "#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = stmt(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Stmt::IfStmt(Box::new(IfStmt {
-                cond: Expr::BinOp(
-                    BinOp::Greater,
-                    Box::new((Expr::Ident(Ident("x")), Expr::Literal(Literal::Integer(10))))
-                ),
-                then_branch: Stmt::StmtBlock(vec![Stmt::Return(Expr::Literal(Literal::Integer(
-                    5
-                )))]),
-                else_branch: None
-            }))
-        )
+        let tree = IfStatement {
+            cond: Expr::BinOp(
+                BinOp::Greater,
+                Box::new((
+                    Expr::Literal(Literal::Symbol("x")),
+                    Expr::Literal(Literal::Integer(10)),
+                )),
+            ),
+            true_branch: vec![Stmt::Return(Expr::Literal(Literal::Integer(5)))],
+            false_branch: vec![],
+        };
+        assert_parsing!(if_statement, text, tree);
     }
 
+    #[test]
+    fn parse_if_else_statement() {
+        let text = r#"
+            if (x > 10) {
+                return 5;
+            } else {
+                return 6;
+            }
+        "#;
+        let tree = IfStatement {
+            cond: Expr::BinOp(
+                BinOp::Greater,
+                Box::new((
+                    Expr::Literal(Literal::Symbol("x")),
+                    Expr::Literal(Literal::Integer(10)),
+                )),
+            ),
+            true_branch: vec![Stmt::Return(Expr::Literal(Literal::Integer(5)))],
+            false_branch: vec![Stmt::Return(Expr::Literal(Literal::Integer(6)))],
+        };
+        assert_parsing!(if_statement, text, tree);
+    }
+
+    #[test]
+    fn parse_if_else_if_statement() {
+        let text = r#"
+            if (x > 10) {
+                return 5;
+            } else if (y == 12) {
+                return 6;
+            }
+        "#;
+        let tree = IfStatement {
+            cond: Expr::BinOp(
+                BinOp::Greater,
+                Box::new((
+                    Expr::Literal(Literal::Symbol("x")),
+                    Expr::Literal(Literal::Integer(10)),
+                )),
+            ),
+            true_branch: vec![Stmt::Return(Expr::Literal(Literal::Integer(5)))],
+            false_branch: vec![Stmt::IfStmt(IfStatement {
+                cond: Expr::BinOp(
+                    BinOp::Equal,
+                    Box::new((
+                        Expr::Literal(Literal::Symbol("y")),
+                        Expr::Literal(Literal::Integer(12)),
+                    )),
+                ),
+                true_branch: vec![Stmt::Return(Expr::Literal(Literal::Integer(6)))],
+                false_branch: vec![],
+            })],
+        };
+        assert_parsing!(if_statement, text, tree);
+    }
+
+    /*
     #[test]
     fn parse_switch_stmt() {
         let def = r#"
@@ -569,13 +690,13 @@ mod tests {
         assert_eq!(
             lit,
             Stmt::SwitchStmt(SwitchStmt {
-                cond: Expr::Ident(Ident("x")),
+                cond: Expr::Literal(Literal::Symbol("x")),
                 case_blocks: vec![
                     CaseBlock {
                         labels: vec![CaseLabel::Literal(Literal::Integer(1))],
                         statements: vec![
                             Stmt::Call(CallExpr {
-                                name: Ident("sayHello"),
+                                name: "sayHello",
                                 arguments: vec![Expr::Literal(Literal::String("Mike"))],
                             }),
                             Stmt::Break
@@ -584,15 +705,11 @@ mod tests {
                     CaseBlock {
                         labels: vec![
                             CaseLabel::Literal(Literal::String("bye")),
-                            CaseLabel::InstanceOf(Path(vec![
-                                Ident("Toybox"),
-                                Ident("Lang"),
-                                Ident("Object")
-                            ]))
+                            CaseLabel::InstanceOf(Path(vec!["Toybox", "Lang", "Object"]))
                         ],
                         statements: vec![
                             Stmt::Call(CallExpr {
-                                name: Ident("sayBye"),
+                                name: "sayBye",
                                 arguments: vec![Expr::Literal(Literal::String("Ralf"))],
                             }),
                             Stmt::Break
@@ -601,7 +718,7 @@ mod tests {
                     CaseBlock {
                         labels: vec![CaseLabel::Default],
                         statements: vec![Stmt::Call(CallExpr {
-                            name: Ident("print"),
+                            name: "print",
                             arguments: vec![Expr::Literal(Literal::String("Nothing to do"))],
                         })],
                     }
@@ -625,7 +742,7 @@ mod tests {
         assert_eq!(
             lit,
             CatchStmt {
-                guard: CatchGuard::Variable(Ident("x")),
+                guard: CatchGuard::Variable("x"),
                 body: vec![Stmt::Break],
             }
         )
@@ -646,10 +763,7 @@ mod tests {
         assert_eq!(
             lit,
             CatchStmt {
-                guard: CatchGuard::InstanceOf(
-                    Ident("n"),
-                    Path(vec![Ident("Toybox"), Ident("Lang"), Ident("Number")]),
-                ),
+                guard: CatchGuard::InstanceOf("n", Path(vec!["Toybox", "Lang", "Number"]),),
                 body: vec![Stmt::Break],
             }
         )
@@ -682,14 +796,11 @@ mod tests {
                 body: vec![],
                 catch_body: vec![
                     CatchStmt {
-                        guard: CatchGuard::InstanceOf(
-                            Ident("ex"),
-                            Path(vec![Ident("AnExceptionClass")]),
-                        ),
+                        guard: CatchGuard::InstanceOf("ex", Path(vec!["AnExceptionClass"]),),
                         body: vec![],
                     },
                     CatchStmt {
-                        guard: CatchGuard::Variable(Ident("ex")),
+                        guard: CatchGuard::Variable("ex"),
                         body: vec![],
                     }
                 ],
@@ -719,27 +830,27 @@ mod tests {
             lit,
             EnumDef(vec![
                 InitializableDef {
-                    name: Ident("x"),
+                    name: "x",
                     init: Some(Expr::Literal(Literal::Integer(1337))),
                 },
                 InitializableDef {
-                    name: Ident("y"),
+                    name: "y",
                     init: None,
                 },
                 InitializableDef {
-                    name: Ident("z"),
+                    name: "z",
                     init: None,
                 },
                 InitializableDef {
-                    name: Ident("a"),
+                    name: "a",
                     init: Some(Expr::Literal(Literal::Integer(0))),
                 },
                 InitializableDef {
-                    name: Ident("b"),
+                    name: "b",
                     init: None,
                 },
                 InitializableDef {
-                    name: Ident("c"),
+                    name: "c",
                     init: None,
                 }
             ])
@@ -754,7 +865,7 @@ mod tests {
             private const APK = "1232130023";
 
             enum {
-                red,
+                red ,
                 green,
                 blue
             }
@@ -777,6 +888,9 @@ mod tests {
             // This function is available only in debug mode
             (:debug) function whenDebugging() {
             }
+
+            class Inner {
+            }
         }
         "#;
 
@@ -787,15 +901,14 @@ mod tests {
         assert_eq!(
             lit,
             ClassDef {
-                name: Ident("MyProjectApp"),
-                extends: Some(Path(vec![Ident("App"), Ident("AppBase")])),
+                id: "MyProjectApp",
+                extends_value: Some(Path(vec!["App", "AppBase"])),
                 members: vec![
-                    DecoratedDef {
+                    ClassDeclaration::ClassMember {
                         annotations: vec![],
-                        scope: Scope::Instance,
-                        visibility: Visibility::Private,
-                        definition: ClassMember::ConstDef(ConstDef {
-                            name: Ident("APK"),
+                        flags: vec![DeclarationFlag::Private],
+                        def: ClassMember::(ConstDef {
+                            name: "APK",
                             init: Expr::Literal(Literal::String("1232130023")),
                         }),
                     },
@@ -803,17 +916,17 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
-                        definition: ClassMember::EnumDef(EnumDef(vec![
+                        definition: ClassDeclaration::EnumDef(EnumDef(vec![
                             InitializableDef {
-                                name: Ident("red"),
+                                name: "red",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("green"),
+                                name: "green",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("blue"),
+                                name: "blue",
                                 init: None,
                             }
                         ])),
@@ -822,18 +935,18 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Private,
-                        definition: ClassMember::VarDef(VarDef {
-                            name: Ident("name"),
+                        definition: ClassDeclaration::VariableDef(VariableDef(vec![InitializableDef {
+                            name: "name",
                             init: Some(Expr::Literal(Literal::String("MyApp"))),
-                        }),
+                        }])),
                     },
                     DecoratedDef {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
-                        definition: ClassMember::FunctionDef(FunctionDef {
-                            name: Ident("onStart"),
-                            params: vec![Ident("state")],
+                        definition: ClassDeclaration::FunctionDef(FunctionDef {
+                            name: ("onStart"),
+                            params: vec!["state"],
                             body: vec![],
                         }),
                     },
@@ -841,9 +954,9 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
-                        definition: ClassMember::FunctionDef(FunctionDef {
-                            name: Ident("onStop"),
-                            params: vec![Ident("state")],
+                        definition: ClassDeclaration::FunctionDef(FunctionDef {
+                            name: ("onStop"),
+                            params: vec![("state")],
                             body: vec![],
                         }),
                     },
@@ -851,25 +964,35 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Static,
                         visibility: Visibility::Private,
-                        definition: ClassMember::FunctionDef(FunctionDef {
-                            name: Ident("getInitialView"),
+                        definition: ClassDeclaration::FunctionDef(FunctionDef {
+                            name: ("getInitialView"),
                             params: vec![],
                             body: vec![Stmt::Return(Expr::NewArray(vec![Expr::NewObject(
                                 NewObject {
-                                    path: Path(vec![Ident("MyProjectView")]),
+                                    path: Path(vec![("MyProjectView")]),
                                     args: vec![Expr::Literal(Literal::String("Hello world"))],
                                 }
                             )]))],
                         }),
                     },
                     DecoratedDef {
-                        annotations: vec![Ident("debug")],
+                        annotations: vec!["debug"],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
-                        definition: ClassMember::FunctionDef(FunctionDef {
-                            name: Ident("whenDebugging"),
+                        definition: ClassDeclaration::FunctionDef(FunctionDef {
+                            name: "whenDebugging",
                             params: vec![],
                             body: vec![],
+                        }),
+                    },
+                    DecoratedDef {
+                        annotations: vec![],
+                        scope: Scope::Instance,
+                        visibility: Visibility::Public,
+                        definition: ClassDeclaration(ClassDef {
+                            id: "Inner",
+                            extends_value: None,
+                            members: vec![]
                         }),
                     }
                 ],
@@ -913,14 +1036,14 @@ mod tests {
         assert_eq!(
             lit,
             ModuleDef {
-                name: Ident("ModuleA"),
+                name: "ModuleA",
                 members: vec![
                     DecoratedDef {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Private,
                         definition: ModuleMember::ConstDef(ConstDef {
-                            name: Ident("APK"),
+                            name: "APK",
                             init: Expr::Literal(Literal::String("1232130023")),
                         }),
                     },
@@ -930,15 +1053,15 @@ mod tests {
                         visibility: Visibility::Public,
                         definition: ModuleMember::EnumDef(EnumDef(vec![
                             InitializableDef {
-                                name: Ident("red"),
+                                name: "red",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("green"),
+                                name: "green",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("blue"),
+                                name: "blue",
                                 init: None,
                             }
                         ])),
@@ -947,17 +1070,17 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Private,
-                        definition: ModuleMember::VarDef(VarDef {
-                            name: Ident("name"),
+                        definition: ModuleMember::VarDef(VariableDef(vec![InitializableDef {
+                            name: ("name"),
                             init: Some(Expr::Literal(Literal::String("MyApp"))),
-                        }),
+                        }])),
                     },
                     DecoratedDef {
-                        annotations: vec![Ident("debug")],
+                        annotations: vec!["debug"],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::FunctionDef(FunctionDef {
-                            name: Ident("whenDebugging"),
+                            name: "whenDebugging",
                             params: vec![],
                             body: vec![],
                         }),
@@ -967,8 +1090,8 @@ mod tests {
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::ClassDef(ClassDef {
-                            name: Ident("SomeClass"),
-                            extends: None,
+                            id: "SomeClass",
+                            extends_value: None,
                             members: vec![],
                         }),
                     },
@@ -977,7 +1100,7 @@ mod tests {
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::ModuleDef(ModuleDef {
-                            name: Ident("ModuleB"),
+                            name: "ModuleB",
                             members: vec![],
                         }),
                     },
@@ -1025,7 +1148,7 @@ mod tests {
                         scope: Scope::Instance,
                         visibility: Visibility::Private,
                         definition: ModuleMember::ConstDef(ConstDef {
-                            name: Ident("APK"),
+                            name: ("APK"),
                             init: Expr::Literal(Literal::String("1232130023")),
                         }),
                     },
@@ -1035,15 +1158,15 @@ mod tests {
                         visibility: Visibility::Public,
                         definition: ModuleMember::EnumDef(EnumDef(vec![
                             InitializableDef {
-                                name: Ident("red"),
+                                name: "red",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("green"),
+                                name: "green",
                                 init: None,
                             },
                             InitializableDef {
-                                name: Ident("blue"),
+                                name: "blue",
                                 init: None,
                             }
                         ])),
@@ -1052,17 +1175,17 @@ mod tests {
                         annotations: vec![],
                         scope: Scope::Instance,
                         visibility: Visibility::Private,
-                        definition: ModuleMember::VarDef(VarDef {
-                            name: Ident("name"),
+                        definition: ModuleMember::VarDef(VariableDef(vec![InitializableDef {
+                            name: "name",
                             init: Some(Expr::Literal(Literal::String("MyApp"))),
-                        }),
+                        }])),
                     },
                     DecoratedDef {
-                        annotations: vec![Ident("debug")],
+                        annotations: vec!["debug"],
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::FunctionDef(FunctionDef {
-                            name: Ident("whenDebugging"),
+                            name: "whenDebugging",
                             params: vec![],
                             body: vec![],
                         }),
@@ -1072,8 +1195,8 @@ mod tests {
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::ClassDef(ClassDef {
-                            name: Ident("SomeClass"),
-                            extends: None,
+                            id: "SomeClass",
+                            extends_value: None,
                             members: vec![],
                         }),
                     },
@@ -1082,7 +1205,7 @@ mod tests {
                         scope: Scope::Instance,
                         visibility: Visibility::Public,
                         definition: ModuleMember::ModuleDef(ModuleDef {
-                            name: Ident("ModuleB"),
+                            name: "ModuleB",
                             members: vec![],
                         }),
                     },
@@ -1090,4 +1213,5 @@ mod tests {
             }
         )
     }
+    */
 }

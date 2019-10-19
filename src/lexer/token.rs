@@ -19,9 +19,15 @@ pub enum Token<'a> {
     EOF,
     Illegal(&'a str),
 
-    Ident(&'a str),
-    Symbol(&'a str),
-    IntLiteral(i64),
+    Id(&'a str),
+    IntNumber(&'a str),
+    LongNumber(&'a str),
+    HexIntNumber(&'a str),
+    HexLongNumber(&'a str),
+    OctalIntNumber(&'a str),
+    OctalLongNumber(&'a str),
+    FloatNumber(&'a str),
+    DoubleNumber(&'a str),
 
     Break,
     Class,
@@ -37,10 +43,12 @@ pub enum Token<'a> {
     While,
     For,
     Function,
+    Has,
     As,
     Using,
     Var,
     Module,
+    ModuleAssign,
     New,
 
     Public,
@@ -48,6 +56,8 @@ pub enum Token<'a> {
     Protected,
 
     Return,
+    Hidden,
+    Native,
     Static,
     Throw,
     Try,
@@ -78,6 +88,7 @@ pub enum Token<'a> {
     And,
     BitAnd,
     BitAndAssign,
+    Tilde,
 
     Or,
     BitOr,
@@ -116,9 +127,11 @@ pub enum Token<'a> {
     CloseParen,
     OpenSquare,
     CloseSquare,
+    CloseSquareB,
 
     StringLiteral(&'a str),
     CharacterLiteral(char),
+    Bling,
 
     LineComment(&'a str),
 

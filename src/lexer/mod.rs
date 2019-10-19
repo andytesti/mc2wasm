@@ -2,23 +2,24 @@ use std::iter::Enumerate;
 use std::ops::{Range, RangeFrom, RangeFull, RangeTo};
 
 use nom::branch::alt;
-use nom::bytes::complete::{escaped, tag, take, take_while};
+use nom::bytes::complete::{escaped, tag, tag_no_case, take, take_while};
 use nom::bytes::complete::{is_a, take_until};
 use nom::character::complete::{
-    alpha0, alphanumeric0, alphanumeric1, char, digit1, line_ending, multispace0, multispace1,
-    none_of, one_of, space1,
+    alpha0, alphanumeric0, alphanumeric1, char, digit0, digit1, hex_digit1, line_ending,
+    multispace0, multispace1, none_of, oct_digit0, oct_digit1, one_of, space1,
 };
-use nom::character::{is_alphabetic, is_space};
-use nom::combinator::{cut, iterator, map, map_res, verify};
+use nom::character::{is_alphabetic, is_hex_digit, is_space};
+use nom::combinator::{cut, iterator, map, map_res, opt, recognize, verify};
 use nom::error::{context, ErrorKind};
 use nom::lib::std::str::FromStr;
 use nom::multi::{many1, separated_list};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated, tuple};
 use nom::{
     AsChar, FindToken, IResult, InputIter, InputLength, InputTake, InputTakeAtPosition, Slice,
 };
 
 use crate::lexer::token::Token;
+use nom::number::complete::recognize_float;
 
 pub mod token;
 
@@ -37,6 +38,7 @@ fn delimiter(i: Input) -> Result<Token> {
         sym("{", Token::OpenBracket),
         sym("}", Token::CloseBracket),
         sym("[", Token::OpenSquare),
+        sym("]b", Token::CloseSquareB),
         sym("]", Token::CloseSquare),
         sym(",", Token::Comma),
         sym(";", Token::Semicolon),
@@ -68,6 +70,10 @@ fn logical(i: Input) -> Result<Token> {
         sym("|=", Token::BitOrAssign),
         sym("||", Token::Or),
         sym("|", Token::BitOr),
+        sym("^=", Token::BitXorAssign),
+        sym("^", Token::BitXor),
+        sym("$", Token::Bling),
+        sym("~", Token::Tilde),
     ))(i)
 }
 
@@ -101,6 +107,8 @@ fn arithmetical(i: Input) -> Result<Token> {
         sym("*", Token::Mul),
         sym("/=", Token::DivAssign),
         sym("/", Token::Div),
+        sym("%=", Token::ModuleAssign),
+        sym("%", Token::Module),
     ))(i)
 }
 
@@ -118,19 +126,16 @@ fn line_comment(i: Input) -> Result<Token> {
 pub fn ident_char(input: Input) -> Result<Input> {
     // TODO add more specific error
     input.split_at_position1_complete(
-        |item| !(item.is_alphanum() || item == '_'),
+        |item| !(item.is_alphanum() || item == '_' || item >= '\u{0080}' && item <= '\u{fffe}'),
         ErrorKind::Alpha,
     )
 }
 
+// Id: ([a-zA-Z_]|'\u0080'..'\ufffe')([a-zA-Z0-9_]|'\u0080'..'\ufffe')*
 fn parse_word(i: Input) -> Result<Input> {
     verify(ident_char, |s: &str| {
         s.chars().next().filter(|c| !c.is_numeric()).is_some()
     })(i)
-}
-
-fn symbol(i: Input) -> Result<Token> {
-    map(preceded(tag(":"), parse_word), Token::Symbol)(i)
 }
 
 fn word(i: Input) -> Result<Token> {
@@ -151,6 +156,7 @@ fn word(i: Input) -> Result<Token> {
         "false" => Token::False,
         "for" => Token::For,
         "function" => Token::Function,
+        "has" => Token::Has,
         "instanceof" => Token::InstanceOf,
         "me" | "self" => Token::Me,
         "null" => Token::Null,
@@ -171,7 +177,7 @@ fn word(i: Input) -> Result<Token> {
         "using" => Token::Using,
         "var" => Token::Var,
         "while" => Token::While,
-        _ => Token::Ident(s),
+        _ => Token::Id(s),
     })(i)
 }
 
@@ -179,8 +185,110 @@ fn illegal(i: Input) -> Result<Token> {
     map(take(1usize), Token::Illegal)(i)
 }
 
-fn int_literal(i: Input) -> Result<Token> {
-    map(map_res(digit1, i64::from_str), Token::IntLiteral)(i)
+fn long_sigil(i: Input) -> Result<char> {
+    one_of("lL")(i)
+}
+
+fn is_long(i: Input) -> Result<bool> {
+    map(opt(long_sigil), |long| long.is_some())(i)
+}
+
+fn positive_digit(i: Input) -> Result<char> {
+    one_of("123456789")(i)
+}
+
+// IntNumber: [0][lL]? |([1-9][0-9]*)[lL]? ;
+fn int_number(i: Input) -> Result<Token> {
+    let long_zero = map(terminated(tag("0"), long_sigil), Token::LongNumber);
+    let digits = recognize(pair(positive_digit, digit0));
+    let positive = map(pair(digits, is_long), |(number, long)| {
+        if long {
+            Token::LongNumber(number)
+        } else {
+            Token::IntNumber(number)
+        }
+    });
+    alt((long_zero, positive))(i)
+}
+
+// HexNumber: '0x'[0-9a-fA-F]+[lL]?;
+fn hex_number(i: Input) -> Result<Token> {
+    let digits = preceded(tag("0x"), hex_digit1);
+    map(pair(digits, is_long), |(n, long)| {
+        if long {
+            Token::HexLongNumber(n)
+        } else {
+            Token::HexIntNumber(n)
+        }
+    })(i)
+}
+
+// OctalNumber: [0][0-9]*[lL]?;
+fn octal_number(i: Input) -> Result<Token> {
+    map(
+        preceded(char('0'), pair(oct_digit1, is_long)),
+        |(n, long)| {
+            if long {
+                Token::OctalLongNumber(n)
+            } else {
+                Token::OctalIntNumber(n)
+            }
+        },
+    )(i)
+}
+
+fn float_exponent(i: Input) -> Result<Input> {
+    recognize(pair(opt(pair(one_of("Ee"), one_of("+-"))), digit1))(i)
+}
+
+fn float_sigil(i: Input) -> Result<char> {
+    one_of("fd")(i)
+}
+
+fn is_double_sigil(c: char) -> bool {
+    c == 'd'
+}
+
+fn is_double(i: Input) -> Result<bool> {
+    map(opt(float_sigil), |c| {
+        c.filter(|c| is_double_sigil(*c)).is_some()
+    })(i)
+}
+
+fn float_token((number, sigil): (Input, char)) -> Token {
+    if is_double_sigil(sigil) {
+        Token::DoubleNumber(number)
+    } else {
+        Token::FloatNumber(number)
+    }
+}
+
+fn fraction(i: Input) -> Result<Input> {
+    recognize(tuple((char('.'), digit1, opt(float_exponent))))(i)
+}
+
+//FloatNumber
+//: ( ([0])('f'|'d')? | ([1-9][0-9]*))([\\.][0-9]+)?FloatExponent?('f'|'d')?
+//| [\\.] [0-9]+ FloatExponent?('f'|'d')?
+fn float_number(i: Input) -> Result<Token> {
+    //fragment FloatExponent: [Ee][+-]?[0-9]+;
+    let zero_token = map(pair(tag("0"), float_sigil), float_token);
+    let positive = recognize(pair(digit1, fraction));
+    let positive_token = map(
+        pair(alt((positive, fraction)), is_double),
+        |(number, double)| {
+            if double {
+                Token::DoubleNumber(number)
+            } else {
+                Token::FloatNumber(number)
+            }
+        },
+    );
+    alt((zero_token, positive_token))(i)
+}
+
+fn number(i: Input) -> Result<Token> {
+    alt((float_number, int_number, hex_number, octal_number))(i)
 }
 
 fn token(i: Input) -> Result<Token> {
@@ -188,12 +296,11 @@ fn token(i: Input) -> Result<Token> {
         multispace0,
         alt((
             line_comment,
-            symbol,
+            number,
             delimiter,
             string_literal,
             operator,
             word,
-            int_literal,
             illegal,
         )),
     )(i)
@@ -223,29 +330,52 @@ impl Lexer {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use nom::combinator::iterator;
 
     use super::*;
+    use token::Token::*;
 
     #[test]
     fn parse_ident() {
-        let code = r#"
-using Toybox.Lang as Lang;
-
-module Foo
-{
-    function operation() {
-        // Do something
+        assert_eq!(
+            lex_tokens("ident ident1 _ident"),
+            Ok(("", vec![Id("ident"), Id("ident1"), Id("_ident")]))
+        );
     }
-}
-function moduleSample() {
-    var v = new Lang.Method(Foo, "hello");
-    var sym = a == b? x : :ImASymbol;
-    v.invoke();
-}
-        "#;
 
-        assert_eq!(lex_tokens(code), Ok(("nice", vec![])));
+    #[test]
+    fn parse_numbers() {
+        assert_eq!(
+            lex_tokens("12 15L 0x40 0x12FL 0234 012l 0f 0d .12 12.0E-12d 0.14f"),
+            Ok((
+                "",
+                vec![
+                    IntNumber("12"),
+                    LongNumber("15"),
+                    HexIntNumber("40"),
+                    HexLongNumber("12F"),
+                    OctalIntNumber("234"),
+                    OctalLongNumber("12"),
+                    FloatNumber("0"),
+                    DoubleNumber("0"),
+                    FloatNumber(".12"),
+                    DoubleNumber("12.0E-12"),
+                    FloatNumber("0.14")
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_ternary() {
+        assert_eq!(
+            lex_tokens("ident_1?_2ident: _"),
+            Ok((
+                "",
+                vec![Id("ident_1"), Question, Id("_2ident"), Colon, Id("_")]
+            ))
+        );
     }
 }

@@ -3,143 +3,281 @@ use crate::lexer::token::Token;
 use crate::parser::ast::*;
 use crate::parser::{between_brackets, between_parens, between_squares};
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take};
 use nom::combinator::{cut, map, map_opt, map_res, opt};
 use nom::error::{context, ErrorKind};
+use nom::lib::std::str::FromStr;
 use nom::multi::{fold_many0, separated_list};
-use nom::sequence::{pair, preceded, separated_pair};
+use nom::sequence::{delimited, pair, preceded, separated_pair, tuple};
+use std::path::Component::Prefix;
+use std::process::exit;
 
-fn string_literal(i: Input) -> Result<&str> {
+fn string_lit(i: Input) -> Result<&str> {
     i.pop_token(|t| match t {
         Token::StringLiteral(s) => Some(*s),
         _ => None,
     })
 }
 
-pub fn symbol_literal(i: Input) -> Result<Ident> {
+pub fn symbol_ref_lit(i: Input) -> Result<Id> {
+    preceded(tag(Token::Colon), symbol)(i)
+}
+
+pub fn symbol(i: Input) -> Result<Id> {
     i.pop_token(|t| match t {
-        Token::Symbol(s) => Some(Ident(*s)),
+        Token::Id(v) => Some(*v),
         _ => None,
     })
 }
 
-pub fn ident(i: Input) -> Result<Ident> {
+fn number_lit(i: Input) -> Result<i64> {
     i.pop_token(|t| match t {
-        Token::Ident(v) => Some(Ident(v)),
+        // TODO use parsing error and distinguish long from int, hex and oct
+        Token::IntNumber(i) => i64::from_str(i).ok(),
         _ => None,
     })
 }
 
-fn integer_literal(i: Input) -> Result<i64> {
-    i.pop_token(|t| match t {
-        Token::IntLiteral(i) => Some(*i),
-        _ => None,
-    })
-}
-
-fn boolean_literal(i: Input) -> Result<bool> {
+fn bool_lit(i: Input) -> Result<bool> {
     alt((
         map(tag(Token::False), |_| false),
         map(tag(Token::True), |_| true),
     ))(i)
 }
-
+// literal
+//    : symbol
+//    | symbolref
+//    | number
+//    | string
+//    | bool
+//    | nullReference
+//    | character
+//    | BlingToken
 pub fn literal(i: Input) -> Result<Literal> {
     alt((
-        map(integer_literal, Literal::Integer),
-        map(string_literal, Literal::String),
-        map(symbol_literal, Literal::Symbol),
-        map(boolean_literal, Literal::Boolean),
+        map(symbol, Literal::Symbol),
+        map(symbol_ref_lit, Literal::SymbolRef),
+        map(number_lit, Literal::Integer),
+        map(string_lit, Literal::String),
+        map(bool_lit, Literal::Boolean),
+        map(tag(Token::Null), |_| Literal::Null),
+        map(tag(Token::Bling), |_| Literal::Global),
+        map(tag(Token::Me), |_| Literal::Me),
     ))(i)
 }
 
-pub fn path(i: Input) -> Result<Path> {
-    map(separated_list(tag(Token::Dot), ident), Path)(i)
-}
-
-fn args(i: Input) -> Result<Vec<Expr>> {
+// invocation
+//    : '(' argc+=expression (',' argc+=expression)* ')'
+//    | '(' ')'
+fn invocation(i: Input) -> Result<Vec<Expr>> {
     between_parens(separated_list(tag(Token::Comma), expr))(i)
 }
 
 pub fn call(i: Input) -> Result<CallExpr> {
-    map(pair(ident, args), |(name, arguments)| CallExpr {
+    map(pair(symbol, invocation), |(name, arguments)| CallExpr {
         name,
         arguments,
     })(i)
 }
 
-fn new_dictionary(i: Input) -> Result<Expr> {
-    let entry = separated_pair(expr, tag(Token::Arrow), expr);
+// op='{' (keyValuePair ',')* keyValuePair? '}'
+fn dictionary_creation(i: Input) -> Result<Expr> {
+    // keyValuePair
+    //    : key=expression '=>' value=expression
+    let key_value_pair = separated_pair(expr, tag(Token::Arrow), expr);
     map(
-        between_brackets(separated_list(tag(Token::Comma), entry)),
+        between_brackets(separated_list(tag(Token::Comma), key_value_pair)),
         Expr::NewDictionary,
     )(i)
 }
 
-fn new_object(i: Input) -> Result<Expr> {
-    map(
-        preceded(tag(Token::New), pair(path, args)),
-        |(path, args)| Expr::NewObject(NewObject { path, args }),
-    )(i)
-}
-
-fn new_array(i: Input) -> Result<Expr> {
+// op='[' (expression ',')* expression? ']'
+fn array_creation(i: Input) -> Result<Expr> {
     map(
         between_squares(separated_list(tag(Token::Comma), expr)),
         Expr::NewArray,
     )(i)
 }
 
-fn new_empty_array(i: Input) -> Result<Expr> {
+// op='[' (expression ',')* expression? ']b'
+fn byte_array_creation(i: Input) -> Result<Expr> {
+    map(
+        delimited(
+            tag(Token::OpenSquare),
+            separated_list(tag(Token::Comma), expr),
+            tag(Token::CloseSquareB),
+        ),
+        Expr::NewByteArray,
+    )(i)
+}
+
+// op='new' '[' expression ']'
+fn empty_array_creation(i: Input) -> Result<Expr> {
     map(preceded(tag(Token::New), between_squares(expr)), |size| {
         Expr::NewEmptyArray(Box::new(size))
     })(i)
+}
+
+// op='new' '[' expression ']b'
+fn empty_byte_array_creation(i: Input) -> Result<Expr> {
+    map(
+        preceded(
+            tag(Token::New),
+            delimited(tag(Token::OpenSquare), expr, tag(Token::CloseSquareB)),
+        ),
+        |size| Expr::NewEmptyByteArray(Box::new(size)),
+    )(i)
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum Scope {
+    Local,
+    Global,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum Lvalue<'a> {
+    Select {
+        scope: Scope,
+        name: Id<'a>,
+        extension: Option<LvalueExtension<'a>>,
+    },
+    Invoke {
+        scope: Scope,
+        name: Id<'a>,
+        arguments: Vec<Expr<'a>>,
+        extension: LvalueExtension<'a>,
+    },
+}
+
+/* lValues are the left hand value of an assignment */
+//lvalue
+//    : (BlingToken op='.')? symbol lvalueExtension?
+//    | (BlingToken op='.')? symbol invocation lvalueExtension
+fn lvalue(i: Input) -> Result<Lvalue> {
+    use Lvalue::*;
+    fn scope(i: Input) -> Result<Scope> {
+        map(opt(preceded(tag(Token::Dot), tag(Token::Bling))), |g| {
+            if g.is_some() {
+                Scope::Global
+            } else {
+                Scope::Local
+            }
+        })(i)
+    }
+    let select = map(
+        tuple((scope, symbol, opt(lvalue_extension))),
+        |(scope, name, extension)| Select {
+            scope,
+            name,
+            extension,
+        },
+    );
+    let invoke = map(
+        tuple((scope, symbol, invocation, lvalue_extension)),
+        |(scope, name, arguments, extension)| Invoke {
+            scope,
+            name,
+            arguments,
+            extension,
+        },
+    );
+    alt((invoke, select))(i)
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum LvalueExtension<'a> {
+    Select(Id<'a>, Option<Box<LvalueExtension<'a>>>),
+    Index(Expr<'a>, Option<Box<LvalueExtension<'a>>>),
+    Invoke(Id<'a>, Vec<Expr<'a>>, Box<LvalueExtension<'a>>),
+}
+
+// lvalueExtension
+//    : op='.' symbol lvalueExtension?
+//    | op='[' expression ']' lvalueExtension?
+//    | op='.' symbol invocation lvalueExtension
+fn lvalue_extension(i: Input) -> Result<LvalueExtension> {
+    use LvalueExtension::*;
+    let select = map(
+        preceded(tag(Token::Dot), pair(symbol, opt(lvalue_extension))),
+        |(sym, tail)| Select(sym, tail.map(Box::new)),
+    );
+    let index = map(
+        pair(between_squares(expr), opt(lvalue_extension)),
+        |(idx, tail)| Index(idx, tail.map(Box::new)),
+    );
+    let invoke = map(
+        preceded(
+            tag(Token::Dot),
+            tuple((symbol, invocation, lvalue_extension)),
+        ),
+        |(field, args, tail)| Invoke(field, args, Box::new(tail)),
+    );
+    alt((invoke, select, index))(i)
+}
+
+/* lValues are the left hand value of an assignment */
+//lvalue
+//    : (BlingToken op='.')? symbol lvalueExtension?
+//    | (BlingToken op='.')? symbol invocation lvalueExtension
+//    ;
+
+//creation
+//    : op='new' lvalue invocation
+//    | op='new' '[' expression ']'
+//    | op='new' '[' expression ']b'
+//    | op='[' (expression ',')* expression? ']'
+//    | op='[' (expression ',')* expression? ']b'
+//    | op='{' (keyValuePair ',')* keyValuePair? '}'
+//    ;
+fn creation(i: Input) -> Result<Expr> {
+    alt((
+        empty_array_creation,
+        empty_byte_array_creation,
+        array_creation,
+        byte_array_creation,
+        dictionary_creation,
+    ))(i)
 }
 
 pub fn group(i: Input) -> Result<Expr> {
     between_parens(expr)(i)
 }
 
-fn node(i: Input) -> Result<Expr> {
-    let me_expr = map(tag(Token::Me), |_| Expr::Me);
-    let null_expr = map(tag(Token::Null), |_| Expr::Null);
+// primary
+//    : literal
+//    | '(' expression ')'
+//    | symbol invocation
+//    | primary op='.' symbol invocation?
+//    | primary arrayAccess
+//    | creation
+fn primary(i: Input) -> Result<Expr> {
     let call_expr = map(call, Expr::Call);
-    let ident_expr = map(ident, Expr::Ident);
     let literal_expr = map(literal, Expr::Literal);
 
-    alt((
-        group,
-        me_expr,
-        null_expr,
-        new_dictionary,
-        new_array,
-        new_empty_array,
-        new_object,
-        call_expr,
-        ident_expr,
-        literal_expr,
-    ))(i)
+    alt((literal_expr, group, call_expr, creation))(i)
 }
 
 fn access(i: Input) -> Result<Expr> {
     enum Access<'a> {
         Index(Expr<'a>),
-        Select(Ident<'a>),
-        Invoke(Ident<'a>, Vec<Expr<'a>>),
+        Select(Id<'a>),
+        Invoke(Id<'a>, Vec<Expr<'a>>),
     }
 
     let index = map(between_squares(expr), Access::Index);
-    let select = map(preceded(tag(Token::Dot), ident), Access::Select);
-    let invoke = map(
-        preceded(tag(Token::Dot), pair(ident, args)),
-        |(name, args)| Access::Invoke(name, args),
-    );
+    let select = map(symbol, Access::Select);
+    let invoke = map(pair(symbol, invocation), |(method, arguments)| {
+        Access::Invoke(method, arguments)
+    });
 
-    let (i, init) = node(i)?;
+    let selection = preceded(tag(Token::Dot), alt((invoke, select)));
+
+    let (i, init) = primary(i)?;
     fold_many0(
-        alt((index, invoke, select)),
+        alt((index, selection)),
         init,
-        |receiver, operation| match operation {
+        |receiver, access| match access {
             Access::Index(offset) => Expr::Index(Box::new(Index { receiver, offset })),
             Access::Select(field) => Expr::Select(Box::new(Select { receiver, field })),
             Access::Invoke(method, arguments) => Expr::Invoke(Box::new(InvokeExpr {
@@ -151,12 +289,14 @@ fn access(i: Input) -> Result<Expr> {
     )(i)
 }
 
-fn unary(i: Input) -> Result<Expr> {
+//factor: primary | op='~' factor | op='!' factor
+fn factor(i: Input) -> Result<Expr> {
     let not = map(tag(Token::Exclamation), |_| PrefixOp::Not);
+    let bit_not = map(tag(Token::Tilde), |_| PrefixOp::BitNot);
     let plus = map(tag(Token::Add), |_| PrefixOp::Plus);
     let minus = map(tag(Token::Sub), |_| PrefixOp::Minus);
-
-    map(pair(opt(alt((not, plus, minus))), access), |(op, value)| {
+    let unary_ops = alt((not, bit_not, plus, minus));
+    map(pair(opt(unary_ops), access), |(op, value)| {
         if let Some(op) = op {
             Expr::PrefixOp(op, Box::new(value))
         } else {
@@ -165,122 +305,130 @@ fn unary(i: Input) -> Result<Expr> {
     })(i)
 }
 
-fn multiplicative(i: Input) -> Result<Expr> {
+// term: factor ( op=termOps factor )*
+fn term(i: Input) -> Result<Expr> {
+    // termOps: '*' | '/' | '%' | '&' | '<<' | '>>' | InstanceOf | Has
     let mul = map(tag(Token::Mul), |_| BinOp::Mul);
     let div = map(tag(Token::Div), |_| BinOp::Div);
+    let module = map(tag(Token::Module), |_| BinOp::Module);
+    let bit_and = map(tag(Token::BitAnd), |_| BinOp::BitAnd);
+    let shift_left = map(tag(Token::SLeft), |_| BinOp::SLeft);
+    let shift_right = map(tag(Token::SRight), |_| BinOp::SRight);
+    let instance_of = map(tag(Token::InstanceOf), |_| BinOp::InstanceOf);
+    let has = map(tag(Token::Has), |_| BinOp::Has);
 
-    let (i, init) = unary(i)?;
+    let term_ops = alt((
+        mul,
+        div,
+        module,
+        bit_and,
+        shift_left,
+        shift_right,
+        instance_of,
+        has,
+    ));
 
-    fold_many0(pair(alt((mul, div)), unary), init, |left, (op, right)| {
+    let (i, init) = factor(i)?;
+
+    fold_many0(pair(term_ops, factor), init, |left, (op, right)| {
         Expr::BinOp(op, Box::new((left, right)))
     })(i)
 }
 
-fn additive(i: Input) -> Result<Expr> {
+// simpleExpression: pn=( '+' | '-')? term ( simpleExpressionOps term )*
+fn simple_expr(i: Input) -> Result<Expr> {
+    // simpleExpressionOps: '+' | '-' | '|' | '^'
     let add = map(tag(Token::Add), |_| BinOp::Add);
     let sub = map(tag(Token::Sub), |_| BinOp::Sub);
+    let bit_or = map(tag(Token::BitOr), |_| BinOp::BitOr);
+    let bit_xor = map(tag(Token::BitXor), |_| BinOp::BitXor);
 
-    let (i, init) = multiplicative(i)?;
+    let simple_expression_ops = alt((add, sub, bit_or, bit_xor));
 
+    let (i, init) = term(i)?;
     fold_many0(
-        pair(alt((add, sub)), multiplicative),
+        pair(simple_expression_ops, term),
         init,
         |left, (op, right)| Expr::BinOp(op, Box::new((left, right))),
     )(i)
 }
 
-fn relational(i: Input) -> Result<Expr> {
+// equalityExpression
+//    : simpleExpression ( op=expressionOps simpleExpression)*
+fn equality_expr(i: Input) -> Result<Expr> {
+    // expressionOps: '==' | '<' | '<=' | '>' | '>=' | '!='
     let eq = map(tag(Token::Equal), |_| BinOp::Equal);
-    let ne = map(tag(Token::Distinct), |_| BinOp::Distinct);
     let lt = map(tag(Token::Less), |_| BinOp::Less);
     let le = map(tag(Token::LessEqual), |_| BinOp::LessEqual);
     let gt = map(tag(Token::Greater), |_| BinOp::Greater);
     let ge = map(tag(Token::GreaterEqual), |_| BinOp::GreaterEqual);
+    let ne = map(tag(Token::Distinct), |_| BinOp::Distinct);
 
-    let operator = alt((eq, ne, lt, le, gt, ge));
+    let expression_ops = alt((eq, lt, le, gt, ge, ne));
 
-    let (i, init) = additive(i)?;
-
-    fold_many0(pair(operator, additive), init, |left, (op, right)| {
-        Expr::BinOp(op, Box::new((left, right)))
-    })(i)
-}
-
-fn logical_and(i: Input) -> Result<Expr> {
-    let (i, init) = relational(i)?;
+    let (i, init) = simple_expr(i)?;
 
     fold_many0(
-        preceded(tag(Token::And), relational),
+        pair(expression_ops, simple_expr),
+        init,
+        |left, (op, right)| Expr::BinOp(op, Box::new((left, right))),
+    )(i)
+}
+
+// conditionalAndExpression
+//   : equalityExpression
+//   | conditionalAndExpression op=('&&' | 'and') conditionalAndExpression
+fn conditional_and_expr(i: Input) -> Result<Expr> {
+    let (i, init) = equality_expr(i)?;
+
+    fold_many0(
+        preceded(tag(Token::And), equality_expr),
         init,
         |left, right| Expr::BinOp(BinOp::And, Box::new((left, right))),
     )(i)
 }
 
-fn logical_or(i: Input) -> Result<Expr> {
-    let (i, init) = logical_and(i)?;
+// conditionalOrExpression
+//   : conditionalAndExpression
+//   | conditionalOrExpression op=('||' | 'or') conditionalOrExpression
+fn conditional_or_expr(i: Input) -> Result<Expr> {
+    let (i, init) = conditional_and_expr(i)?;
 
     fold_many0(
-        preceded(tag(Token::Or), logical_and),
+        preceded(tag(Token::Or), conditional_and_expr),
         init,
         |left, right| Expr::BinOp(BinOp::Or, Box::new((left, right))),
     )(i)
 }
 
-fn ternary(i: Input) -> Result<Expr> {
+// conditionalExpression
+// : conditionalOrExpression
+// | conditionalOrExpression op='?' expression ':' conditionalExpression
+fn conditional_expr(i: Input) -> Result<Expr> {
     let branches = preceded(
         tag(Token::Question),
-        separated_pair(expr, tag(Token::Colon), expr),
+        separated_pair(expr, tag(Token::Colon), conditional_expr),
     );
-    map(pair(logical_or, opt(branches)), |(condition, branches)| {
-        if let Some((then_branch, else_branch)) = branches {
-            Expr::Ternary(Box::new(Ternary {
-                condition,
-                then_branch,
-                else_branch,
-            }))
-        } else {
-            condition
-        }
-    })(i)
-}
-
-pub fn assignment(i: Input) -> Result<Expr> {
-    let simple = map(tag(Token::Assign), |_| AssignmentOp::Simple);
-    let add = map(tag(Token::AddAssign), |_| AssignmentOp::Add);
-    let sub = map(tag(Token::SubAssign), |_| AssignmentOp::Sub);
-    let mul = map(tag(Token::MulAssign), |_| AssignmentOp::Mul);
-    let div = map(tag(Token::DivAssign), |_| AssignmentOp::Div);
-    let sleft = map(tag(Token::SLeftAssign), |_| AssignmentOp::SLeft);
-    let sright = map(tag(Token::SRightAssign), |_| AssignmentOp::SRight);
-
-    let operator = alt((simple, add, sub, mul, div, sleft, sright));
-    map_opt(
-        pair(ternary, opt(pair(operator, expr))),
-        |(assignee, right)| {
-            if let Some((operator, value)) = right {
-                let assignee = match assignee {
-                    Expr::Ident(var) => Assignee::Var(var),
-                    Expr::Index(i) => Assignee::Index(*i),
-                    Expr::Select(s) => Assignee::Select(*s),
-                    // TODO add specific failure
-                    _ => None?,
-                };
-                Some(Expr::Assignment(Box::new(Assignment {
-                    operator,
-                    assignee,
-                    value,
-                })))
-            } else {
-                Some(assignee)
-            }
-        },
-    )(i)
+    alt((
+        map(
+            pair(conditional_or_expr, branches),
+            |(condition, (then_branch, else_branch))| {
+                Expr::Ternary(Box::new(Ternary {
+                    condition,
+                    then_branch,
+                    else_branch,
+                }))
+            },
+        ),
+        conditional_or_expr,
+    ))(i)
 }
 
 pub fn expr(i: Input) -> Result<Expr> {
-    assignment(i)
+    conditional_expr(i)
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -299,8 +447,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_ident() {
-        assert_parsing!("_identifier1", Expr::Ident(Ident("_identifier1")))
+    fn parse_symbol() {
+        assert_parsing!(
+            "_Symbolifier1",
+            Expr::Literal(Literal::Symbol("_Symbolifier1"))
+        )
     }
 
     #[test]
@@ -309,18 +460,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_path() {
-        assert_parsing!(path, "a.b", Path(vec![Ident("a"), Ident("b")]))
-    }
-
-    #[test]
-    fn parse_new_object() {
+    fn parse_lvalue_extension() {
+        use LvalueExtension::*;
         assert_parsing!(
-            "new Lang.Object(12)",
-            Expr::NewObject(NewObject {
-                path: Path(vec![Ident("Lang"), Ident("Object")]),
-                args: vec![Expr::Literal(Literal::Integer(12))],
-            })
+            lvalue_extension,
+            ".bb.cc[12].dd(:sym).cc",
+            Select(
+                "bb",
+                Some(Box::new(Select(
+                    "cc",
+                    Some(Box::new(Index(
+                        Expr::Literal(Literal::Integer(12)),
+                        Some(Box::new(Invoke(
+                            "dd",
+                            vec![Expr::Literal(Literal::SymbolRef("sym"))],
+                            Box::new(Select("cc", None))
+                        )))
+                    )))
+                )))
+            )
         )
     }
 
@@ -335,7 +493,7 @@ mod tests {
             "#,
             Expr::NewDictionary(vec![
                 (
-                    Expr::Literal(Literal::Symbol(Ident("x"))),
+                    Expr::Literal(Literal::SymbolRef("x")),
                     Expr::Literal(Literal::String("hello"))
                 ),
                 (
@@ -351,7 +509,7 @@ mod tests {
         assert_parsing!(
             "a[10]",
             Expr::Index(Box::new(Index {
-                receiver: Expr::Ident(Ident("a")),
+                receiver: Expr::Literal(Literal::Symbol("a")),
                 offset: Expr::Literal(Literal::Integer(10))
             }))
         )
@@ -363,7 +521,7 @@ mod tests {
             "a[10][20]",
             Expr::Index(Box::new(Index {
                 receiver: Expr::Index(Box::new(Index {
-                    receiver: Expr::Ident(Ident("a")),
+                    receiver: Expr::Literal(Literal::Symbol("a")),
                     offset: Expr::Literal(Literal::Integer(10))
                 })),
                 offset: Expr::Literal(Literal::Integer(20))
@@ -378,14 +536,25 @@ mod tests {
             Expr::Invoke(Box::new(InvokeExpr {
                 receiver: Expr::Invoke(Box::new(InvokeExpr {
                     receiver: Expr::Select(Box::new(Select {
-                        receiver: Expr::Ident(Ident("a")),
-                        field: Ident("b")
+                        receiver: Expr::Literal(Literal::Symbol("a")),
+                        field: "b"
                     })),
-                    method: Ident("c"),
+                    method: "c",
                     arguments: vec![Expr::Literal(Literal::Integer(10))]
                 })),
-                method: Ident("d"),
+                method: "d",
                 arguments: vec![Expr::Literal(Literal::Integer(11))]
+            }))
+        )
+    }
+
+    #[test]
+    fn parse_global_select() {
+        assert_parsing!(
+            "$.b",
+            Expr::Select(Box::new(Select {
+                receiver: Expr::Literal(Literal::Global),
+                field: "b",
             }))
         )
     }
@@ -400,11 +569,14 @@ mod tests {
                     Expr::BinOp(
                         BinOp::Mul,
                         Box::new((
-                            Expr::PrefixOp(PrefixOp::Minus, Box::new(Expr::Ident(Ident("a")))),
+                            Expr::PrefixOp(
+                                PrefixOp::Minus,
+                                Box::new(Expr::Literal(Literal::Symbol("a")))
+                            ),
                             Expr::Literal(Literal::Integer(12))
                         ))
                     ),
-                    Expr::Ident(Ident("c"))
+                    Expr::Literal(Literal::Symbol("c"))
                 )),
             )
         )
@@ -420,14 +592,14 @@ mod tests {
                     Expr::BinOp(
                         BinOp::Add,
                         Box::new((
-                            Expr::Ident(Ident("a")),
+                            Expr::Literal(Literal::Symbol("a")),
                             Expr::BinOp(
                                 BinOp::Mul,
                                 Box::new((
-                                    Expr::Ident(Ident("b")),
+                                    Expr::Literal(Literal::Symbol("b")),
                                     Expr::PrefixOp(
                                         PrefixOp::Minus,
-                                        Box::new(Expr::Ident(Ident("c")))
+                                        Box::new(Expr::Literal(Literal::Symbol("c")))
                                     )
                                 ))
                             )
@@ -435,7 +607,10 @@ mod tests {
                     ),
                     Expr::BinOp(
                         BinOp::Div,
-                        Box::new((Expr::Literal(Literal::Integer(4)), Expr::Ident(Ident("d"))))
+                        Box::new((
+                            Expr::Literal(Literal::Integer(4)),
+                            Expr::Literal(Literal::Symbol("d"))
+                        ))
                     )
                 ))
             )
@@ -443,25 +618,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_ternary() {
+    fn parse_conditional_expr() {
         assert_parsing!(
-            "a? b: c",
+            "a? b: c?d :e",
             Expr::Ternary(Box::new(Ternary {
-                condition: Expr::Ident(Ident("a")),
-                then_branch: Expr::Ident(Ident("b")),
-                else_branch: Expr::Ident(Ident("c"))
-            }))
-        )
-    }
-
-    #[test]
-    fn parse_assign() {
-        assert_parsing!(
-            "a = b[10] += c.d -= e",
-            Expr::Ternary(Box::new(Ternary {
-                condition: Expr::Ident(Ident("a")),
-                then_branch: Expr::Ident(Ident("b")),
-                else_branch: Expr::Ident(Ident("c"))
+                condition: Expr::Literal(Literal::Symbol("a")),
+                then_branch: Expr::Literal(Literal::Symbol("b")),
+                else_branch: Expr::Ternary(Box::new(Ternary {
+                    condition: Expr::Literal(Literal::Symbol("c")),
+                    then_branch: Expr::Literal(Literal::Symbol("d")),
+                    else_branch: Expr::Literal(Literal::Symbol("e"))
+                }))
             }))
         )
     }

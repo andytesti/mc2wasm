@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 pub type Body<'a> = Vec<Stmt<'a>>;
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Ident<'a>(pub &'a str);
+pub type Id<'a> = &'a str;
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Path<'a>(pub Vec<Ident<'a>>);
+pub struct ModuleId<'a>(pub Vec<Id<'a>>);
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
@@ -16,20 +15,26 @@ pub enum Visibility {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct InitializableDef<'a> {
-    pub name: Ident<'a>,
-    pub init: Option<Expr<'a>>,
+pub struct VariableDefPair<'a> {
+    pub name: Id<'a>,
+    pub value: Option<Expr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ClassDef<'a> {
-    pub name: Ident<'a>,
-    pub extends: Option<Path<'a>>,
-    pub members: Vec<DecoratedDef<'a, ClassMember<'a>>>,
+    pub id: Id<'a>,
+    pub extends_value: Option<ModuleId<'a>>,
+    pub members: Vec<ClassDeclaration<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct EnumDef<'a>(pub Vec<InitializableDef<'a>>);
+pub struct EnumDeclaration<'a> {
+    pub id: Id<'a>,
+    pub initializer: Option<Expr<'a>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumDef<'a>(pub Vec<EnumDeclaration<'a>>);
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AssignmentOp {
@@ -49,31 +54,35 @@ pub struct Assignment<'a> {
     pub value: Expr<'a>,
 }
 
-pub type VarDef<'a> = InitializableDef<'a>;
+#[derive(Debug, PartialEq, Clone)]
+pub enum VariableKind {
+    Var,
+    Const,
+}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct ConstDef<'a> {
-    pub name: Ident<'a>,
-    pub init: Expr<'a>,
+pub struct VariableDef<'a> {
+    pub kind: VariableKind,
+    pub pairs: Vec<VariableDefPair<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FunctionDef<'a> {
-    pub name: Ident<'a>,
-    pub params: Vec<Ident<'a>>,
-    pub body: StmtBlock<'a>,
+    pub id: Id<'a>,
+    pub params: Vec<Id<'a>>,
+    pub body: CodeBlock<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CallExpr<'a> {
-    pub name: Ident<'a>,
+    pub name: Id<'a>,
     pub arguments: Vec<Expr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct InvokeExpr<'a> {
     pub receiver: Expr<'a>,
-    pub method: Ident<'a>,
+    pub method: Id<'a>,
     pub arguments: Vec<Expr<'a>>,
 }
 
@@ -86,8 +95,7 @@ pub struct Ternary<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ModuleMember<'a> {
-    VarDef(VarDef<'a>),
-    ConstDef(ConstDef<'a>),
+    VarDef(VariableDef<'a>),
     EnumDef(EnumDef<'a>),
     FunctionDef(FunctionDef<'a>),
     ClassDef(ClassDef<'a>),
@@ -96,30 +104,27 @@ pub enum ModuleMember<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ModuleDef<'a> {
-    pub name: Ident<'a>,
+    pub name: Id<'a>,
     pub members: Vec<DecoratedDef<'a, ModuleMember<'a>>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Using<'a> {
-    pub path: Path<'a>,
-    pub alias: Option<Ident<'a>>,
+pub struct UsingDef<'a> {
+    pub using_module: ModuleId<'a>,
+    pub name: Option<Id<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NewObject<'a> {
-    pub path: Path<'a>,
+    pub path: ModuleId<'a>,
     pub args: Vec<Expr<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Group<'a>(pub Expr<'a>);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct IfStmt<'a> {
+pub struct IfStatement<'a> {
     pub cond: Expr<'a>,
-    pub then_branch: Stmt<'a>,
-    pub else_branch: Option<Stmt<'a>>,
+    pub true_branch: CodeBlock<'a>,
+    pub false_branch: CodeBlock<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -139,35 +144,40 @@ pub struct WhileStmt<'a> {
 #[derive(Debug, PartialEq, Clone)]
 pub struct DoWhileStmt<'a> {
     pub cond: Expr<'a>,
-    pub body: StmtBlock<'a>,
+    pub body: CodeBlock<'a>,
 }
 
-pub type StmtBlock<'a> = Vec<Stmt<'a>>;
+pub type CodeBlock<'a> = Vec<Stmt<'a>>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal<'a> {
+    Null,
+    Me,
+    Global,
     Boolean(bool),
     Character(char),
     Integer(i64),
     String(&'a str),
-    Symbol(Ident<'a>),
+    Symbol(Id<'a>),
+    SymbolRef(Id<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum CaseLabel<'a> {
     Literal(Literal<'a>),
-    InstanceOf(Path<'a>),
+    InstanceOf(ModuleId<'a>),
     Default,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CaseBlock<'a> {
     pub labels: Vec<CaseLabel<'a>>,
-    pub statements: StmtBlock<'a>,
+    pub statements: CodeBlock<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum BinOp {
+    Module,
     Div,
     Mul,
     Add,
@@ -179,7 +189,14 @@ pub enum BinOp {
     Equal,
     Distinct,
     And,
+    BitAnd,
     Or,
+    BitOr,
+    InstanceOf,
+    Has,
+    BitXor,
+    SLeft,
+    SRight,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -190,21 +207,21 @@ pub struct SwitchStmt<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum CatchGuard<'a> {
-    Variable(Ident<'a>),
-    InstanceOf(Ident<'a>, Path<'a>),
+    Variable(Id<'a>),
+    InstanceOf(Id<'a>, ModuleId<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CatchStmt<'a> {
     pub guard: CatchGuard<'a>,
-    pub body: StmtBlock<'a>,
+    pub body: CodeBlock<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct TryStmt<'a> {
-    pub body: StmtBlock<'a>,
+    pub body: CodeBlock<'a>,
     pub catch_body: Vec<CatchStmt<'a>>,
-    pub finally_body: Option<StmtBlock<'a>>,
+    pub finally_body: Option<CodeBlock<'a>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -213,23 +230,23 @@ pub enum Stmt<'a> {
     Assignment(Assignment<'a>),
     Call(CallExpr<'a>),
     Invoke(InvokeExpr<'a>),
-    Using(Using<'a>),
+    Using(UsingDef<'a>),
     Function(FunctionDef<'a>),
-    VarDef(VarDef<'a>),
+    VarDef(VariableDef<'a>),
     Return(Expr<'a>),
-    IfStmt(Box<IfStmt<'a>>),
+    IfStmt(IfStatement<'a>),
     ForStmt(Box<ForStmt<'a>>),
     WhileStmt(Box<WhileStmt<'a>>),
     DoWhileStmt(DoWhileStmt<'a>),
     SwitchStmt(SwitchStmt<'a>),
     TryStmt(TryStmt<'a>),
     Throw(Expr<'a>),
-    StmtBlock(StmtBlock<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum PrefixOp {
     Not,
+    BitNot,
     Plus,
     Minus,
 }
@@ -243,12 +260,12 @@ pub struct Index<'a> {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Select<'a> {
     pub receiver: Expr<'a>,
-    pub field: Ident<'a>,
+    pub field: Id<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Assignee<'a> {
-    Var(Ident<'a>),
+    Var(Id<'a>),
     Index(Index<'a>),
     Select(Select<'a>),
 }
@@ -256,9 +273,7 @@ pub enum Assignee<'a> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expr<'a> {
     PrefixOp(PrefixOp, Box<Expr<'a>>),
-    Null,
     Me,
-    Ident(Ident<'a>),
     Literal(Literal<'a>),
     BinOp(BinOp, Box<(Expr<'a>, Expr<'a>)>),
     Assignment(Box<Assignment<'a>>),
@@ -267,9 +282,10 @@ pub enum Expr<'a> {
     Call(CallExpr<'a>),
     Invoke(Box<InvokeExpr<'a>>),
     Index(Box<Index<'a>>),
-    Group(Box<Group<'a>>),
     NewArray(Vec<Expr<'a>>),
+    NewByteArray(Vec<Expr<'a>>),
     NewEmptyArray(Box<Expr<'a>>),
+    NewEmptyByteArray(Box<Expr<'a>>),
     NewDictionary(Vec<(Expr<'a>, Expr<'a>)>),
     NewObject(NewObject<'a>),
 }
@@ -282,7 +298,7 @@ pub enum Scope {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct DecoratedDef<'a, T: 'a> {
-    pub annotations: Vec<Ident<'a>>,
+    pub annotations: Vec<Id<'a>>,
     pub scope: Scope,
     pub visibility: Visibility,
     pub definition: T,
@@ -290,10 +306,30 @@ pub struct DecoratedDef<'a, T: 'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ClassMember<'a> {
-    VarDef(VarDef<'a>),
-    ConstDef(ConstDef<'a>),
+    VariableDef(VariableDef<'a>),
     FunctionDef(FunctionDef<'a>),
     EnumDef(EnumDef<'a>),
+    ClassDef(ClassDef<'a>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum DeclarationFlag {
+    Hidden,
+    Static,
+    Native,
+    Public,
+    Private,
+    Protected,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ClassDeclaration<'a> {
+    ClassMember {
+        annotations: Vec<Id<'a>>,
+        flags: Vec<DeclarationFlag>,
+        def: ClassMember<'a>,
+    },
+    UsingDef(UsingDef<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
