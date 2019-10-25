@@ -107,9 +107,8 @@ fn invocation(i: Input) -> Result<Vec<Expression>> {
 }
 
 pub fn call(i: Input) -> Result<Call> {
-    map(pair(symbol, invocation), |(name, arguments)| Call {
-        name,
-        arguments,
+    map(pair(symbol, invocation), |(name, arguments)| {
+        Call(name, arguments)
     })(i)
 }
 
@@ -193,7 +192,7 @@ impl<'a> LValueExtension<'a> {
         let (root, extension): (Expression, _) = match self {
             LValueExtension::Select(id, extension) => (Literal::Symbol(id).into(), extension),
             LValueExtension::Invoke(name, arguments, extension) => {
-                (Call { name, arguments }.into(), Some(extension))
+                (Call(name, arguments).into(), Some(extension))
             }
             _ => unreachable!(),
         };
@@ -207,23 +206,19 @@ impl<'a> LValueExtension<'a> {
     fn into_global_expr(self, receiver: Expression<'a>) -> Expression<'a> {
         match self {
             LValueExtension::Select(field, extension) => {
-                let node = Select { receiver, field }.into();
+                let node = Select(receiver, field).into();
                 if let Some(extension) = extension {
                     extension.into_global_expr(node)
                 } else {
                     node
                 }
             }
-            LValueExtension::Invoke(method, arguments, extension) => extension.into_global_expr(
-                Invoke {
-                    receiver,
-                    method,
-                    arguments,
-                }
-                .into(),
-            ),
+            LValueExtension::Invoke(method, arguments, extension) => {
+                let node = Invoke(receiver, method, arguments).into();
+                extension.into_global_expr(node)
+            }
             LValueExtension::Index(offset, extension) => {
-                let node = Index { receiver, offset }.into();
+                let node = Index(receiver, offset).into();
                 if let Some(extension) = extension {
                     extension.into_global_expr(node)
                 } else {
@@ -257,14 +252,14 @@ pub fn lvalue(i: Input) -> Result<Expression> {
             extension: LValueExtension::Invoke(method, arguments, Box::new(extension)),
         },
     );
-    map_from(alt((select, invoke)))(i)
+    map_from(alt((invoke, select)))(i)
 }
 
 // lvalueExtension
 //    : op='.' symbol lvalueExtension?
 //    | op='[' expression ']' lvalueExtension?
 //    | op='.' symbol invocation lvalueExtension
-pub fn lvalue_extension(i: Input) -> Result<LValueExtension> {
+fn lvalue_extension(i: Input) -> Result<LValueExtension> {
     let select = map(
         preceded(tag(Token::Dot), pair(symbol, opt(lvalue_extension))),
         |(field, extension)| LValueExtension::Select(field, extension.map(Box::new)),
@@ -282,7 +277,7 @@ pub fn lvalue_extension(i: Input) -> Result<LValueExtension> {
             LValueExtension::Invoke(method, arguments, Box::new(extension))
         },
     );
-    alt((select, index, invoke))(i)
+    alt((invoke, select, index))(i)
 }
 
 fn object_creation(i: Input) -> Result<Expression> {
@@ -348,14 +343,9 @@ fn access(i: Input) -> Result<Expression> {
         alt((index, selection)),
         init,
         |receiver, message| match message {
-            Message::Index(offset) => Index { receiver, offset }.into(),
-            Message::Select(field) => Select { receiver, field }.into(),
-            Message::Invoke(method, arguments) => Invoke {
-                receiver,
-                method,
-                arguments,
-            }
-            .into(),
+            Message::Index(offset) => Index(receiver, offset).into(),
+            Message::Select(field) => Select(receiver, field).into(),
+            Message::Invoke(method, arguments) => Invoke(receiver, method, arguments).into(),
         },
     )(i)
 }
@@ -512,11 +502,11 @@ mod tests {
             let tokens = crate::lexer::token::Tokens::new(&token_input);
             let (_, actual) = $parser(tokens).unwrap();
 
-            assert_eq!(actual, $expected);
+            assert_eq!(actual, $expected.into());
         }};
 
         ($source:expr, $expected:expr) => {
-            assert_parsing!(expression, $source, $expected.into())
+            assert_parsing!(expression, $source, $expected)
         };
     }
 
@@ -535,13 +525,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_lvalue() {
+    fn parse_local_lvalue_select() {
         let text = "Lang.Integer";
-        let tree = Select {
-            receiver: Id("Lang").into(),
-            field: Id("Integer").into(),
-        }
-        .into();
+        let tree = Select(Id("Lang").into(), Id("Integer").into());
+        assert_parsing!(lvalue, text, tree)
+    }
+
+    #[test]
+    fn parse_local_lvalue_call() {
+        let text = "lang().Integer";
+        let tree = Select(Call(Id("lang").into(), vec![]).into(), Id("Integer").into());
+        assert_parsing!(lvalue, text, tree)
+    }
+
+    #[test]
+    fn parse_local_lvalue_index() {
+        let text = "lang[10]";
+        let tree = Index(Id("lang").into(), 10.into());
+        assert_parsing!(lvalue, text, tree)
+    }
+
+    #[test]
+    fn parse_global_lvalue_select() {
+        let text = "$.Lang.Integer";
+        let tree = Select(
+            Select(Literal::Global.into(), Id("Lang").into()).into(),
+            Id("Integer").into(),
+        );
+        assert_parsing!(lvalue, text, tree)
+    }
+
+    #[test]
+    fn parse_global_lvalue_call() {
+        let text = "$.lang().Integer";
+        let tree = Select(
+            Invoke(Literal::Global.into(), Id("lang"), Default::default()).into(),
+            Id("Integer").into(),
+        );
+        assert_parsing!(lvalue, text, tree)
+    }
+
+    #[test]
+    fn parse_global_lvalue_index() {
+        let text = "$.lang[10]";
+        let tree = Index(
+            Select(Literal::Global.into(), Id("lang").into()).into(),
+            10.into(),
+        );
         assert_parsing!(lvalue, text, tree)
     }
 
@@ -549,13 +579,7 @@ mod tests {
     fn parse_object_creation() {
         let text = "new Lang.Integer()";
         let tree = Expression::Object {
-            lvalue: Box::new(
-                Select {
-                    receiver: Id("Lang").into(),
-                    field: Id("Integer").into(),
-                }
-                .into(),
-            ),
+            lvalue: Box::new(Select(Id("Lang").into(), Id("Integer").into()).into()),
             arguments: Default::default(),
         };
         assert_parsing!(text, tree)
@@ -632,54 +656,37 @@ mod tests {
     #[test]
     fn parse_index() {
         let text = "a[10]";
-        let tree = Index {
-            receiver: Id("a").into(),
-            offset: 10.into(),
-        };
+        let tree = Index(Id("a").into(), 10.into());
         assert_parsing!(text, tree)
     }
 
     #[test]
     fn parse_double_index() {
         let text = "a[10][20]";
-        let tree = Index {
-            receiver: Index {
-                receiver: Id("a").into(),
-                offset: 10.into(),
-            }
-            .into(),
-            offset: 20.into(),
-        };
+        let tree = Index(Index(Id("a").into(), 10.into()).into(), 20.into());
         assert_parsing!(text, tree)
     }
 
     #[test]
     fn parse_select() {
         let text = "a.b.c(10).d(11)";
-        let tree = Invoke {
-            receiver: Invoke {
-                receiver: Select {
-                    receiver: Id("a").into(),
-                    field: Id("b"),
-                }
-                .into(),
-                method: Id("c"),
-                arguments: vec![10.into()],
-            }
+        let tree = Invoke(
+            Invoke(
+                Select(Id("a").into(), Id("b")).into(),
+                Id("c"),
+                vec![10.into()],
+            )
             .into(),
-            method: Id("d"),
-            arguments: vec![11.into()],
-        };
+            Id("d"),
+            vec![11.into()],
+        );
         assert_parsing!(text, tree)
     }
 
     #[test]
     fn parse_global_select() {
         let text = "$.b";
-        let tree = Select {
-            receiver: Literal::Global.into(),
-            field: Id("b"),
-        };
+        let tree = Select(Literal::Global.into(), Id("b"));
         assert_parsing!(text, tree)
     }
 

@@ -83,17 +83,10 @@ pub struct FunctionDef<'a> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Call<'a> {
-    pub name: Id<'a>,
-    pub arguments: Vec<Expression<'a>>,
-}
+pub struct Call<'a>(pub Id<'a>, pub Vec<Expression<'a>>);
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Invoke<'a> {
-    pub receiver: Expression<'a>,
-    pub method: Id<'a>,
-    pub arguments: Vec<Expression<'a>>,
-}
+pub struct Invoke<'a>(pub Expression<'a>, pub Id<'a>, pub Vec<Expression<'a>>);
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Ternary<'a> {
@@ -421,16 +414,10 @@ pub enum PrefixOp {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Index<'a> {
-    pub receiver: Expression<'a>,
-    pub offset: Expression<'a>,
-}
+pub struct Index<'a>(pub Expression<'a>, pub Expression<'a>);
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Select<'a> {
-    pub receiver: Expression<'a>,
-    pub field: Id<'a>,
-}
+pub struct Select<'a>(pub Expression<'a>, pub Id<'a>);
 
 pub type Invocation<'a> = Vec<Expression<'a>>;
 
