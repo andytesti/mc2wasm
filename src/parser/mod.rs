@@ -11,7 +11,7 @@ use nom::Err;
 use nom::IResult;
 
 use crate::lexer::token::{Token, Tokens};
-use crate::parser::ast::BinOp::BitAnd;
+use crate::parser::ast::InfixOp::BitAnd;
 use crate::parser::ast::*;
 use crate::parser::expr::{
     call, creation, expression, factor, group, literal, lvalue, symbol, symbol_ref,
@@ -326,27 +326,180 @@ fn statement(i: Input) -> Result<Statement> {
         map_from(while_statement),
         map_from(semicolon_terminated(do_statement)),
         map_from(for_statement),
-        // switch_statement
+        map_from(switch_statement),
         semicolon_terminated(break_statement),
         semicolon_terminated(continue_statement),
         map_from(semicolon_terminated(throw_statement)),
-        // try_statement
+        map_from(try_statement),
         return_statement,
+    ))(i)
+}
+
+// switchStatement
+//    : SwitchToken '(' expression ')' '{' ( caseStatement )+ '}'
+fn switch_statement(i: Input) -> Result<SwitchStatement> {
+    map(
+        preceded(
+            tag(Token::Switch),
+            pair(
+                between_parens(expression),
+                between_braces(many1(case_statement)),
+            ),
+        ),
+        |(test, case_statements)| SwitchStatement {
+            test,
+            case_statements,
+        },
+    )(i)
+}
+
+// caseStatement
+//    : CaseToken expression ':' caseStmt = statementSequenceEntry
+//    | CaseToken InstanceOf lvalue ':' caseStmt = statementSequenceEntry
+//    | DefaultToken ':' caseStmt = statementSequenceEntry
+fn case_statement(i: Input) -> Result<CaseStatement> {
+    let cs1 = map(
+        preceded(
+            tag(Token::Case),
+            separated_pair(expression, tag(Token::Colon), statement_sequence_entry),
+        ),
+        |(label, body)| CaseStatement {
+            label: CaseLabel::Expression(label),
+            body,
+        },
+    );
+    let cs2 = map(
+        preceded(
+            pair(tag(Token::Case), tag(Token::InstanceOf)),
+            separated_pair(lvalue, tag(Token::Colon), statement_sequence_entry),
+        ),
+        |(label, body)| CaseStatement {
+            label: CaseLabel::InstanceOf(label),
+            body,
+        },
+    );
+    let cs3 = map(
+        preceded(
+            pair(tag(Token::Default), tag(Token::Colon)),
+            statement_sequence_entry,
+        ),
+        |body| CaseStatement {
+            label: CaseLabel::Default,
+            body,
+        },
+    );
+    alt((cs1, cs2, cs3))(i)
+}
+
+// statementSequenceEntry
+//    : statementSequence?
+//    | codeBlock
+fn statement_sequence_entry(i: Input) -> Result<Sequence> {
+    alt((
+        map(opt(statement_sequence), Option::unwrap_or_default),
+        code_block,
     ))(i)
 }
 
 //statementSequence
 //    : statement statementSequence?
 //    | codeBlock statementSequence?
-fn statement_sequence(i: Input) -> Result<CodeBlock> {
+fn statement_sequence(i: Input) -> Result<Sequence> {
     many1(statement)(i)
 }
 
 //codeBlock
 //    :  '{' '}'
 //    | '{' statementSequence '}'
-fn code_block(i: Input) -> Result<CodeBlock> {
-    between_braces(statement_sequence)(i)
+fn code_block(i: Input) -> Result<Sequence> {
+    between_braces(many0(statement))(i)
+}
+
+// tryStatement
+//    : tryBlock catchTypeBlock+ catchBlock? finallyBlock?
+//    | tryBlock catchTypeBlock* catchBlock finallyBlock?
+//    | tryBlock catchTypeBlock* catchBlock? finallyBlock
+fn try_statement(i: Input) -> Result<TryStatement> {
+    //    : tryBlock catchTypeBlock+ catchBlock? finallyBlock?
+    let ts1 = map(
+        tuple((
+            try_block,
+            many1(catch_type_block),
+            opt(catch_block),
+            opt(finally_block),
+        )),
+        |(try_block, catch_type_blocks, catch_block, finally_block)| TryStatement {
+            try_block,
+            catch_type_blocks,
+            catch_block,
+            finally_block,
+        },
+    );
+
+    //    | tryBlock catchTypeBlock* catchBlock finallyBlock?
+    let ts2 = map(
+        tuple((
+            try_block,
+            many0(catch_type_block),
+            catch_block,
+            opt(finally_block),
+        )),
+        |(try_block, catch_type_blocks, catch_block, finally_block)| TryStatement {
+            try_block,
+            catch_type_blocks,
+            catch_block: Some(catch_block),
+            finally_block,
+        },
+    );
+
+    //    | tryBlock catchTypeBlock* catchBlock? finallyBlock
+    let ts3 = map(
+        tuple((
+            try_block,
+            many0(catch_type_block),
+            opt(catch_block),
+            finally_block,
+        )),
+        |(try_block, catch_type_blocks, catch_block, finally_block)| TryStatement {
+            try_block,
+            catch_type_blocks,
+            catch_block,
+            finally_block: Some(finally_block),
+        },
+    );
+    alt((ts1, ts2, ts3))(i)
+}
+
+// tryBlock: TryToken codeBlock;
+fn try_block(i: Input) -> Result<Sequence> {
+    preceded(tag(Token::Try), code_block)(i)
+}
+
+// catchTypeBlock: CatchToken '(' symbol InstanceOf lvalue ')' codeBlock;
+fn catch_type_block(i: Input) -> Result<CatchTypeBlock> {
+    map(
+        preceded(
+            tag(Token::Catch),
+            pair(
+                between_parens(separated_pair(symbol, tag(Token::InstanceOf), lvalue)),
+                code_block,
+            ),
+        ),
+        |(test, body)| CatchTypeBlock { test, body },
+    )(i)
+}
+
+// catchBlock: CatchToken '(' symbol ')' codeBlock;
+fn catch_block(i: Input) -> Result<CatchBlock> {
+    map(
+        preceded(tag(Token::Catch), pair(between_parens(symbol), code_block)),
+        |(test, body)| CatchBlock { test, body },
+    )(i)
+}
+
+// finallyBlock: FinallyToken codeBlock;
+fn finally_block(i: Input) -> Result<Sequence> {
+    preceded(tag(Token::Finally), code_block)(i)
 }
 
 // ifStatement
@@ -367,45 +520,6 @@ fn if_statement(i: Input) -> Result<IfStatement> {
             test: cond,
             true_branch,
             false_branch: false_branch.unwrap_or_default(),
-        },
-    )(i)
-}
-
-fn case_label(i: Input) -> Result<CaseLabel> {
-    terminated(
-        alt((
-            map(preceded(tag(Token::Case), literal), CaseLabel::Literal),
-            map(
-                preceded(pair(tag(Token::Case), tag(Token::InstanceOf)), module_id),
-                CaseLabel::InstanceOf,
-            ),
-            map(tag(Token::Default), |_| CaseLabel::Default),
-        )),
-        tag(Token::Colon),
-    )(i)
-}
-
-fn case_block(i: Input) -> Result<CaseBlock> {
-    map(
-        pair(many1(case_label), many1(statement)),
-        |(labels, statements)| CaseBlock { labels, statements },
-    )(i)
-}
-
-fn switch_stmt(i: Input) -> Result<Statement> {
-    map(
-        preceded(
-            tag(Token::Switch),
-            pair(
-                between_parens(expression),
-                between_braces(many1(case_block)),
-            ),
-        ),
-        |(cond, case_blocks)| {
-            Statement::Switch(SwitchStatement {
-                test: cond,
-                case_blocks,
-            })
         },
     )(i)
 }
@@ -545,47 +659,17 @@ fn module_def(i: Input) -> Result<ModuleDef> {
     )(i)
 }
 
-fn catch_stmt(i: Input) -> Result<CatchStmt> {
-    let variable = map(symbol, CatchGuard::Variable);
-    let instanceof = map(
-        separated_pair(symbol, tag(Token::InstanceOf), module_id),
-        |(var, class)| CatchGuard::InstanceOf(var, class),
-    );
-    let catch_guard = between_parens(alt((instanceof, variable)));
-    map(
-        preceded(tag(Token::Catch), pair(catch_guard, code_block)),
-        |(guard, body)| CatchStmt { guard, body },
-    )(i)
-}
-
 // throwStatement: ThrowToken ( lvalue | creation );
 fn throw_statement(i: Input) -> Result<Statement> {
     let value = alt((lvalue, creation));
     map(preceded(tag(Token::Throw), value), Statement::Throw)(i)
 }
 
-fn try_stmt(i: Input) -> Result<Statement> {
-    let try_block = preceded(tag(Token::Try), code_block);
-    let catch_block = many0(catch_stmt);
-    let finally_block = opt(preceded(tag(Token::Finally), code_block));
-
-    map(
-        tuple((try_block, catch_block, finally_block)),
-        |(body, catch_body, finally_body)| {
-            Statement::Try(TryStatement {
-                body,
-                catch_body,
-                finally_body,
-            })
-        },
-    )(i)
-}
-
 mod tests {
     use crate::lexer::Lexer;
 
     use super::*;
-    use crate::parser::ast::BinOp;
+    use crate::parser::ast::InfixOp;
 
     macro_rules! assert_parsing {
         ($parser:ident, $source:expr, $expected:expr) => {{
@@ -719,7 +803,7 @@ mod tests {
             }
         "#;
         let tree = IfStatement {
-            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Infix(InfixOp::Greater, Id("x").into(), 10.into()).into(),
             true_branch: vec![Statement::Return(Some(5.into()))],
             false_branch: vec![],
         };
@@ -736,7 +820,7 @@ mod tests {
             }
         "#;
         let tree = IfStatement {
-            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Infix(InfixOp::Greater, Id("x").into(), 10.into()).into(),
             true_branch: vec![Statement::Return(Some(5.into()))],
             false_branch: vec![Statement::Return(Some(6.into()))],
         };
@@ -753,10 +837,10 @@ mod tests {
             }
         "#;
         let tree = IfStatement {
-            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Infix(InfixOp::Greater, Id("x").into(), 10.into()).into(),
             true_branch: vec![Statement::Return(Some(5.into()))],
             false_branch: vec![IfStatement {
-                test: Expression::BinOp(BinOp::Equal, Box::new((Id("y").into(), 12.into()))),
+                test: Infix(InfixOp::Equal, Id("y").into(), 12.into()).into(),
                 true_branch: vec![Statement::Return(Some(6.into()))],
                 false_branch: vec![],
             }
@@ -773,7 +857,7 @@ mod tests {
             }
         "#;
         let tree = WhileStatement {
-            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Infix(InfixOp::Greater, Id("x").into(), 10.into()).into(),
             body: vec![Statement::Break],
         };
         assert_parsing!(text, tree);
@@ -787,7 +871,7 @@ mod tests {
             } while (x > 10);
         "#;
         let tree = DoStatement {
-            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Infix(InfixOp::Greater, Id("x").into(), 10.into()).into(),
             body: vec![Statement::Break],
         };
         assert_parsing!(text, tree);
@@ -834,12 +918,242 @@ mod tests {
                 }])
                 .into(),
             ),
-            test: Some(Expression::BinOp(
-                BinOp::Less,
-                Box::new((Id("i").into(), 10.into())),
-            )),
+            test: Some(Infix(InfixOp::Less, Id("i").into(), 10.into()).into()),
             increment: vec![Assignment::Postfix(IncOp::Add, Id("i").into())],
             body: vec![Statement::Break],
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_try_finally() {
+        let text = r#"
+            try {
+                println(12);
+            } finally {
+                return 10;
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![],
+            catch_block: None,
+            finally_block: Some(vec![Statement::Return(Some(10.into()))]),
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_try_catch() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e) {
+                println(e);
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![],
+            catch_block: Some(CatchBlock {
+                test: Id("e"),
+                body: vec![Expression::from(Call(Id("println"), vec![Id("e").into()])).into()],
+            }),
+            finally_block: None,
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_try_catch_finally() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e) {
+                println(e);
+            } finally {
+                return 10;
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![],
+            catch_block: Some(CatchBlock {
+                test: Id("e"),
+                body: vec![Expression::from(Call(Id("println"), vec![Id("e").into()])).into()],
+            }),
+            finally_block: Some(vec![Statement::Return(Some(10.into()))]),
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_try_catch_type() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e instanceof Exception1) {
+                println("Error 1");
+            } catch (e instanceof Exception2) {
+                println("Error 2");
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![
+                CatchTypeBlock {
+                    test: (Id("e"), Id("Exception1").into()),
+                    body: vec![
+                        Expression::from(Call(Id("println"), vec!["Error 1".into()])).into(),
+                    ],
+                },
+                CatchTypeBlock {
+                    test: (Id("e"), Id("Exception2").into()),
+                    body: vec![
+                        Expression::from(Call(Id("println"), vec!["Error 2".into()])).into(),
+                    ],
+                },
+            ],
+            catch_block: None,
+            finally_block: None,
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_try_catch_type_finally() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e instanceof Exception1) {
+                println("Error 1");
+            } finally {
+                println("We tried");
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![CatchTypeBlock {
+                test: (Id("e"), Id("Exception1").into()),
+                body: vec![Expression::from(Call(Id("println"), vec!["Error 1".into()])).into()],
+            }],
+            catch_block: None,
+            finally_block: Some(vec![Expression::from(Call(
+                Id("println"),
+                vec!["We tried".into()],
+            ))
+            .into()]),
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_full_catch() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e instanceof Exception1) {
+                println("Error 1");
+            } catch(e) {
+                println("I don't know");
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![CatchTypeBlock {
+                test: (Id("e"), Id("Exception1").into()),
+                body: vec![Expression::from(Call(Id("println"), vec!["Error 1".into()])).into()],
+            }],
+            catch_block: Some(CatchBlock {
+                test: Id("e"),
+                body: vec![
+                    Expression::from(Call(Id("println"), vec!["I don't know".into()])).into(),
+                ],
+            }),
+            finally_block: None,
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_full_catch_finally() {
+        let text = r#"
+            try {
+                println(12);
+            } catch (e instanceof Exception1) {
+                println("Error 1");
+            } catch(e) {
+                println("I don't know");
+            } finally {
+                println("We tried");
+            }
+        "#;
+        let tree = TryStatement {
+            try_block: vec![Expression::from(Call(Id("println"), vec![12.into()])).into()],
+            catch_type_blocks: vec![CatchTypeBlock {
+                test: (Id("e"), Id("Exception1").into()),
+                body: vec![Expression::from(Call(Id("println"), vec!["Error 1".into()])).into()],
+            }],
+            catch_block: Some(CatchBlock {
+                test: Id("e"),
+                body: vec![
+                    Expression::from(Call(Id("println"), vec!["I don't know".into()])).into(),
+                ],
+            }),
+            finally_block: Some(vec![Expression::from(Call(
+                Id("println"),
+                vec!["We tried".into()],
+            ))
+            .into()]),
+        };
+        assert_parsing!(text, tree);
+    }
+
+    #[test]
+    fn parse_switch_statement() {
+        let text = r#"
+            switch(x) {
+                case 1:
+                    sayHello("Mike");
+                    break;
+                case "bye":
+                case instanceof Lang.Object:
+                    sayBye("Ralph");
+                    break;
+                default:
+                    print("nothing to do");
+        }
+        "#;
+        let tree = SwitchStatement {
+            test: Id("x").into(),
+            case_statements: vec![
+                CaseStatement {
+                    label: CaseLabel::Expression(1.into()),
+                    body: vec![
+                        Expression::from(Call(Id("sayHello"), vec!["Mike".into()])).into(),
+                        Statement::Break,
+                    ],
+                },
+                CaseStatement {
+                    label: CaseLabel::Expression("bye".into()),
+                    body: vec![],
+                },
+                CaseStatement {
+                    label: CaseLabel::InstanceOf(
+                        Select(Id("Lang").into(), Id("Object").into()).into(),
+                    ),
+                    body: vec![
+                        Expression::from(Call(Id("sayBye"), vec!["Ralph".into()])).into(),
+                        Statement::Break,
+                    ],
+                },
+                CaseStatement {
+                    label: CaseLabel::Default,
+                    body: vec![
+                        Expression::from(Call(Id("print"), vec!["nothing to do".into()])).into(),
+                    ],
+                },
+            ],
         };
         assert_parsing!(text, tree);
     }
@@ -901,88 +1215,6 @@ mod tests {
                         })],
                     }
                 ],
-            })
-        )
-    }
-
-    #[test]
-    fn parse_var_catch_stmt() {
-        let def = r#"
-        catch(x) {
-            break;
-        }
-        "#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = catch_stmt(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            CatchStmt {
-                guard: CatchGuard::Variable("x"),
-                body: vec![Stmt::Break],
-            }
-        )
-    }
-
-    #[test]
-    fn parse_instanceof_catch_stmt() {
-        let def = r#"
-        catch(n instanceof Toybox.Lang.Number) {
-            break;
-        }
-        "#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = catch_stmt(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            CatchStmt {
-                guard: CatchGuard::InstanceOf("n", Path(vec!["Toybox", "Lang", "Number"]),),
-                body: vec![Stmt::Break],
-            }
-        )
-    }
-
-    #[test]
-    fn parse_try_stmt() {
-        let def = r#"
-        try {
-            // Code to execute
-        }
-        catch( ex instanceof AnExceptionClass ) {
-            // Code to handle the throw of AnExceptionClass
-        }
-        catch( ex ) {
-            // Code to catch all execeptions
-        }
-        finally {
-            // Code to execute when
-        }
-        "#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = try_stmt(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Stmt::TryStmt(TryStmt {
-                body: vec![],
-                catch_body: vec![
-                    CatchStmt {
-                        guard: CatchGuard::InstanceOf("ex", Path(vec!["AnExceptionClass"]),),
-                        body: vec![],
-                    },
-                    CatchStmt {
-                        guard: CatchGuard::Variable("ex"),
-                        body: vec![],
-                    }
-                ],
-                finally_body: Some(vec![]),
             })
         )
     }

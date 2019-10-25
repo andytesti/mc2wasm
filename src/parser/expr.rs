@@ -166,25 +166,10 @@ fn empty_byte_array_creation(i: Input) -> Result<Expression> {
     )(i)
 }
 
-struct LValue<'a> {
-    global: bool,
-    extension: LValueExtension<'a>,
-}
-
 enum LValueExtension<'a> {
     Select(Id<'a>, Option<Box<LValueExtension<'a>>>),
     Index(Expression<'a>, Option<Box<LValueExtension<'a>>>),
     Invoke(Id<'a>, Invocation<'a>, Box<LValueExtension<'a>>),
-}
-
-impl<'a> From<LValue<'a>> for Expression<'a> {
-    fn from(lv: LValue<'a>) -> Self {
-        if lv.global {
-            lv.extension.into_global_expr(Literal::Global.into())
-        } else {
-            lv.extension.into_local_expr()
-        }
-    }
 }
 
 impl<'a> LValueExtension<'a> {
@@ -197,30 +182,34 @@ impl<'a> LValueExtension<'a> {
             _ => unreachable!(),
         };
         if let Some(extension) = extension {
-            extension.into_global_expr(root)
+            extension.into_expr(root)
         } else {
             root
         }
     }
 
-    fn into_global_expr(self, receiver: Expression<'a>) -> Expression<'a> {
+    fn into_global_expr(self) -> Expression<'a> {
+        self.into_expr(Literal::Global.into())
+    }
+
+    fn into_expr(self, receiver: Expression<'a>) -> Expression<'a> {
         match self {
             LValueExtension::Select(field, extension) => {
                 let node = Select(receiver, field).into();
                 if let Some(extension) = extension {
-                    extension.into_global_expr(node)
+                    extension.into_expr(node)
                 } else {
                     node
                 }
             }
             LValueExtension::Invoke(method, arguments, extension) => {
                 let node = Invoke(receiver, method, arguments).into();
-                extension.into_global_expr(node)
+                extension.into_expr(node)
             }
             LValueExtension::Index(offset, extension) => {
                 let node = Index(receiver, offset).into();
                 if let Some(extension) = extension {
-                    extension.into_global_expr(node)
+                    extension.into_expr(node)
                 } else {
                     node
                 }
@@ -240,19 +229,29 @@ pub fn lvalue(i: Input) -> Result<Expression> {
     }
     let select = map(
         tuple((is_global, symbol, opt(lvalue_extension))),
-        |(global, field, extension)| LValue {
-            global,
-            extension: LValueExtension::Select(field, extension.map(Box::new)),
+        |(global, field, extension)| {
+            (
+                global,
+                LValueExtension::Select(field, extension.map(Box::new)),
+            )
         },
     );
     let invoke = map(
         tuple((is_global, symbol, invocation, lvalue_extension)),
-        |(scope, method, arguments, extension)| LValue {
-            global: scope,
-            extension: LValueExtension::Invoke(method, arguments, Box::new(extension)),
+        |(global, method, arguments, extension)| {
+            (
+                global,
+                LValueExtension::Invoke(method, arguments, Box::new(extension)),
+            )
         },
     );
-    map_from(alt((invoke, select)))(i)
+    map(alt((invoke, select)), |(global, extension)| {
+        if global {
+            extension.into_global_expr()
+        } else {
+            extension.into_local_expr()
+        }
+    })(i)
 }
 
 // lvalueExtension
@@ -320,7 +319,7 @@ pub fn group(i: Input) -> Result<Expression> {
 //    | primary arrayAccess
 //    | creation
 fn primary(i: Input) -> Result<Expression> {
-    alt((map_from(literal), group, map_from(call), creation))(i)
+    alt((map_from(call), map_from(literal), group, creation))(i)
 }
 
 fn access(i: Input) -> Result<Expression> {
@@ -369,14 +368,14 @@ pub fn factor(i: Input) -> Result<Expression> {
 // term: factor ( op=termOps factor )*
 fn term(i: Input) -> Result<Expression> {
     // termOps: '*' | '/' | '%' | '&' | '<<' | '>>' | InstanceOf | Has
-    let mul = map(tag(Token::Mul), |_| BinOp::Mul);
-    let div = map(tag(Token::Div), |_| BinOp::Div);
-    let module = map(tag(Token::Module), |_| BinOp::Module);
-    let bit_and = map(tag(Token::BitAnd), |_| BinOp::BitAnd);
-    let shift_left = map(tag(Token::SLeft), |_| BinOp::SLeft);
-    let shift_right = map(tag(Token::SRight), |_| BinOp::SRight);
-    let instance_of = map(tag(Token::InstanceOf), |_| BinOp::InstanceOf);
-    let has = map(tag(Token::Has), |_| BinOp::Has);
+    let mul = map(tag(Token::Mul), |_| InfixOp::Mul);
+    let div = map(tag(Token::Div), |_| InfixOp::Div);
+    let module = map(tag(Token::Module), |_| InfixOp::Module);
+    let bit_and = map(tag(Token::BitAnd), |_| InfixOp::BitAnd);
+    let shift_left = map(tag(Token::SLeft), |_| InfixOp::SLeft);
+    let shift_right = map(tag(Token::SRight), |_| InfixOp::SRight);
+    let instance_of = map(tag(Token::InstanceOf), |_| InfixOp::InstanceOf);
+    let has = map(tag(Token::Has), |_| InfixOp::Has);
 
     let term_ops = alt((
         mul,
@@ -392,17 +391,17 @@ fn term(i: Input) -> Result<Expression> {
     let (i, init) = factor(i)?;
 
     fold_many0(pair(term_ops, factor), init, |left, (op, right)| {
-        Expression::BinOp(op, Box::new((left, right)))
+        Infix(op, left, right).into()
     })(i)
 }
 
 // simpleExpression: pn=( '+' | '-')? term ( simpleExpressionOps term )*
 fn simple_expr(i: Input) -> Result<Expression> {
     // simpleExpressionOps: '+' | '-' | '|' | '^'
-    let add = map(tag(Token::Add), |_| BinOp::Add);
-    let sub = map(tag(Token::Sub), |_| BinOp::Sub);
-    let bit_or = map(tag(Token::BitOr), |_| BinOp::BitOr);
-    let bit_xor = map(tag(Token::BitXor), |_| BinOp::BitXor);
+    let add = map(tag(Token::Add), |_| InfixOp::Add);
+    let sub = map(tag(Token::Sub), |_| InfixOp::Sub);
+    let bit_or = map(tag(Token::BitOr), |_| InfixOp::BitOr);
+    let bit_xor = map(tag(Token::BitXor), |_| InfixOp::BitXor);
 
     let simple_expression_ops = alt((add, sub, bit_or, bit_xor));
 
@@ -410,7 +409,7 @@ fn simple_expr(i: Input) -> Result<Expression> {
     fold_many0(
         pair(simple_expression_ops, term),
         init,
-        |left, (op, right)| Expression::BinOp(op, Box::new((left, right))),
+        |left, (op, right)| Infix(op, left, right).into(),
     )(i)
 }
 
@@ -418,12 +417,12 @@ fn simple_expr(i: Input) -> Result<Expression> {
 //    : simpleExpression ( op=expressionOps simpleExpression)*
 fn equality_expr(i: Input) -> Result<Expression> {
     // expressionOps: '==' | '<' | '<=' | '>' | '>=' | '!='
-    let eq = map(tag(Token::Equal), |_| BinOp::Equal);
-    let lt = map(tag(Token::Less), |_| BinOp::Less);
-    let le = map(tag(Token::LessEqual), |_| BinOp::LessEqual);
-    let gt = map(tag(Token::Greater), |_| BinOp::Greater);
-    let ge = map(tag(Token::GreaterEqual), |_| BinOp::GreaterEqual);
-    let ne = map(tag(Token::Distinct), |_| BinOp::Distinct);
+    let eq = map(tag(Token::Equal), |_| InfixOp::Equal);
+    let lt = map(tag(Token::Less), |_| InfixOp::Less);
+    let le = map(tag(Token::LessEqual), |_| InfixOp::LessEqual);
+    let gt = map(tag(Token::Greater), |_| InfixOp::Greater);
+    let ge = map(tag(Token::GreaterEqual), |_| InfixOp::GreaterEqual);
+    let ne = map(tag(Token::Distinct), |_| InfixOp::Distinct);
 
     let expression_ops = alt((eq, lt, le, gt, ge, ne));
 
@@ -432,7 +431,7 @@ fn equality_expr(i: Input) -> Result<Expression> {
     fold_many0(
         pair(expression_ops, simple_expr),
         init,
-        |left, (op, right)| Expression::BinOp(op, Box::new((left, right))),
+        |left, (op, right)| Infix(op, left, right).into(),
     )(i)
 }
 
@@ -445,7 +444,7 @@ fn conditional_and_expr(i: Input) -> Result<Expression> {
     fold_many0(
         preceded(tag(Token::And), equality_expr),
         init,
-        |left, right| Expression::BinOp(BinOp::And, Box::new((left, right))),
+        |left, right| Infix(InfixOp::And, left, right).into(),
     )(i)
 }
 
@@ -458,7 +457,7 @@ fn conditional_or_expr(i: Input) -> Result<Expression> {
     fold_many0(
         preceded(tag(Token::Or), conditional_and_expr),
         init,
-        |left, right| Expression::BinOp(BinOp::Or, Box::new((left, right))),
+        |left, right| Infix(InfixOp::Or, left, right).into(),
     )(i)
 }
 
@@ -693,18 +692,15 @@ mod tests {
     #[test]
     fn parse_multiplicative() {
         let text = "-a * 12 / c";
-        let tree = Expression::BinOp(
-            BinOp::Div,
-            Box::new((
-                Expression::BinOp(
-                    BinOp::Mul,
-                    Box::new((
-                        Expression::PrefixOp(PrefixOp::Minus, Box::new(Id("a").into())),
-                        12.into(),
-                    )),
-                ),
-                Id("c").into(),
-            )),
+        let tree = Infix(
+            InfixOp::Div,
+            Infix(
+                InfixOp::Mul,
+                Expression::PrefixOp(PrefixOp::Minus, Box::new(Id("a").into())),
+                12.into(),
+            )
+            .into(),
+            Id("c").into(),
         );
         assert_parsing!(text, tree)
     }
@@ -712,24 +708,20 @@ mod tests {
     #[test]
     fn parse_additive() {
         let text = "a + b * -c - 4 / d";
-        let tree = Expression::BinOp(
-            BinOp::Sub,
-            Box::new((
-                Expression::BinOp(
-                    BinOp::Add,
-                    Box::new((
-                        Id("a").into(),
-                        Expression::BinOp(
-                            BinOp::Mul,
-                            Box::new((
-                                Id("b").into(),
-                                Expression::PrefixOp(PrefixOp::Minus, Box::new(Id("c").into())),
-                            )),
-                        ),
-                    )),
-                ),
-                Expression::BinOp(BinOp::Div, Box::new((4.into(), Id("d").into()))),
-            )),
+        let tree = Infix(
+            InfixOp::Sub,
+            Infix(
+                InfixOp::Add,
+                Id("a").into(),
+                Infix(
+                    InfixOp::Mul,
+                    Id("b").into(),
+                    Expression::PrefixOp(PrefixOp::Minus, Box::new(Id("c").into())),
+                )
+                .into(),
+            )
+            .into(),
+            Infix(InfixOp::Div, 4.into(), Id("d").into()).into(),
         );
         assert_parsing!(text, tree)
     }
