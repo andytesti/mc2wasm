@@ -58,9 +58,9 @@ pub enum IncOp {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Assignment<'a> {
-    Infix(AssignmentOp, LValue<'a>, Expression<'a>),
-    Prefix(IncOp, LValue<'a>),
-    Postfix(IncOp, LValue<'a>),
+    Infix(AssignmentOp, Expression<'a>, Expression<'a>),
+    Prefix(IncOp, Expression<'a>),
+    Postfix(IncOp, Expression<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -111,7 +111,6 @@ pub enum ModuleMember<'a> {
     ClassDef(ClassDef<'a>),
     ModuleDef(ModuleDef<'a>),
 }
-
 
 impl<'a> From<ConstantDef<'a>> for ModuleMember<'a> {
     fn from(cf: ConstantDef<'a>) -> Self {
@@ -174,6 +173,18 @@ pub enum ForInitialize<'a> {
     VarDeclaration(VariableDef<'a>),
 }
 
+impl<'a> From<Vec<Assignment<'a>>> for ForInitialize<'a> {
+    fn from(a: Vec<Assignment<'a>>) -> Self {
+        ForInitialize::Assignments(a)
+    }
+}
+
+impl<'a> From<VariableDef<'a>> for ForInitialize<'a> {
+    fn from(vd: VariableDef<'a>) -> Self {
+        ForInitialize::VarDeclaration(vd)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct ForStatement<'a> {
     pub initialize: Option<ForInitialize<'a>>,
@@ -184,13 +195,13 @@ pub struct ForStatement<'a> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhileStatement<'a> {
-    pub cond: Expression<'a>,
+    pub test: Expression<'a>,
     pub body: CodeBlock<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct DoStatement<'a> {
-    pub cond: Expression<'a>,
+    pub test: Expression<'a>,
     pub body: CodeBlock<'a>,
 }
 
@@ -203,7 +214,10 @@ pub enum Literal<'a> {
     Global,
     Boolean(bool),
     Character(char),
-    Integer(i64),
+    Integer(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
     String(&'a str),
     Symbol(Id<'a>),
     SymbolRef(SymbolRef<'a>),
@@ -217,7 +231,7 @@ impl<'a> From<bool> for Literal<'a> {
 
 impl<'a> From<i64> for Literal<'a> {
     fn from(i: i64) -> Self {
-        Literal::Integer(i)
+        Literal::Long(i)
     }
 }
 
@@ -239,7 +253,7 @@ pub enum SymbolRefValue<'a> {
     String(&'a str),
     Bool(bool),
     Null,
-    Number(i64),
+    Integer(i64),
     Character(char),
     Array(Vec<Id<'a>>),
 }
@@ -289,7 +303,7 @@ pub enum BinOp {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SwitchStatement<'a> {
-    pub cond: Expression<'a>,
+    pub test: Expression<'a>,
     pub case_blocks: Vec<CaseBlock<'a>>,
 }
 
@@ -310,24 +324,6 @@ pub struct TryStatement<'a> {
     pub body: CodeBlock<'a>,
     pub catch_body: Vec<CatchStmt<'a>>,
     pub finally_body: Option<CodeBlock<'a>>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum ThrowStatement<'a> {
-    LValue(LValue<'a>),
-    Creation(Creation<'a>),
-}
-
-impl<'a> From<LValue<'a>> for ThrowStatement<'a> {
-    fn from(e: LValue<'a>) -> Self {
-        ThrowStatement::LValue(e)
-    }
-}
-
-impl<'a> From<Creation<'a>> for ThrowStatement<'a> {
-    fn from(c: Creation<'a>) -> Self {
-        ThrowStatement::Creation(c)
-    }
 }
 
 //     : assignment ';'
@@ -356,9 +352,10 @@ pub enum Statement<'a> {
     Switch(SwitchStatement<'a>),
     Break,
     Continue,
-    Throw(ThrowStatement<'a>),
+    Throw(Expression<'a>),
     Try(TryStatement<'a>),
     Return(Option<Expression<'a>>),
+    CodeBlock(CodeBlock<'a>),
 }
 
 impl<'a> From<Assignment<'a>> for Statement<'a> {
@@ -403,9 +400,15 @@ impl<'a> From<DoStatement<'a>> for Statement<'a> {
     }
 }
 
-impl<'a> From<ThrowStatement<'a>> for Statement<'a> {
-    fn from(t: ThrowStatement<'a>) -> Self {
-        Statement::Throw(t)
+impl<'a> From<ForStatement<'a>> for Statement<'a> {
+    fn from(fs: ForStatement<'a>) -> Self {
+        Statement::For(fs)
+    }
+}
+
+impl<'a> From<CodeBlock<'a>> for Statement<'a> {
+    fn from(cb: CodeBlock<'a>) -> Self {
+        Statement::CodeBlock(cb)
     }
 }
 
@@ -432,32 +435,6 @@ pub struct Select<'a> {
 pub type Invocation<'a> = Vec<Expression<'a>>;
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct LValue<'a> {
-    pub scope: Scope,
-    pub extension: LValueExtension<'a>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum LValueExtension<'a> {
-    Select(Id<'a>, Option<Box<LValueExtension<'a>>>),
-    Index(Expression<'a>, Option<Box<LValueExtension<'a>>>),
-    Invoke(Id<'a>, Invocation<'a>, Box<LValueExtension<'a>>),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Creation<'a> {
-    Array(Vec<Expression<'a>>),
-    ByteArray(Vec<Expression<'a>>),
-    EmptyArray(Expression<'a>),
-    EmptyByteArray(Expression<'a>),
-    Dictionary(Vec<(Expression<'a>, Expression<'a>)>),
-    Object {
-        lvalue: LValue<'a>,
-        args: Vec<Expression<'a>>,
-    },
-}
-
-#[derive(Debug, PartialEq, Clone)]
 pub enum Expression<'a> {
     Me,
     PrefixOp(PrefixOp, Box<Expression<'a>>),
@@ -468,7 +445,15 @@ pub enum Expression<'a> {
     Select(Box<Select<'a>>),
     Invoke(Box<Invoke<'a>>),
     Index(Box<Index<'a>>),
-    Creation(Box<Creation<'a>>),
+    Array(Vec<Expression<'a>>),
+    ByteArray(Vec<Expression<'a>>),
+    EmptyArray(Box<Expression<'a>>),
+    EmptyByteArray(Box<Expression<'a>>),
+    Dictionary(Vec<(Expression<'a>, Expression<'a>)>),
+    Object {
+        lvalue: Box<Expression<'a>>,
+        arguments: Vec<Expression<'a>>,
+    },
 }
 
 impl<'a> From<Id<'a>> for Expression<'a> {
@@ -528,12 +513,6 @@ impl<'a> From<Select<'a>> for Expression<'a> {
 impl<'a> From<Invoke<'a>> for Expression<'a> {
     fn from(i: Invoke<'a>) -> Self {
         Expression::Invoke(Box::new(i))
-    }
-}
-
-impl<'a> From<Creation<'a>> for Expression<'a> {
-    fn from(c: Creation<'a>) -> Self {
-        Expression::Creation(Box::new(c))
     }
 }
 

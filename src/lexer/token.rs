@@ -121,13 +121,13 @@ pub enum Token<'a> {
     GreaterEqual,
     Greater,
 
-    OpenBracket,
-    CloseBracket,
+    OpenBrace,
+    CloseBrace,
     OpenParen,
     CloseParen,
-    OpenSquare,
-    CloseSquare,
-    CloseSquareB,
+    OpenBracket,
+    CloseBracket,
+    CloseBracketB,
 
     StringLiteral(&'a str),
     CharacterLiteral(char),

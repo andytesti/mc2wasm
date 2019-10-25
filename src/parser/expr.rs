@@ -1,7 +1,7 @@
 use super::{Input, Result};
 use crate::lexer::token::Token;
 use crate::parser::ast::*;
-use crate::parser::{between_brackets, between_parens, between_squares, map_from};
+use crate::parser::{between_braces, between_brackets, between_parens, map_from};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
 use nom::combinator::{cut, flat_map, map, map_opt, map_res, opt, verify};
@@ -41,7 +41,7 @@ fn symbolref_id(i: Input) -> Result<SymbolRef> {
         map(string_lit, String),
         map(bool_lit, Bool),
         map(tag(Token::Null), |_| Null),
-        map(number_lit, Number),
+        map(number_lit, Integer),
         map(symbolref_id_array, Array),
     )));
     map(pair(symbol, opt(value)), |(id, value)| SymbolRef {
@@ -53,7 +53,7 @@ fn symbolref_id(i: Input) -> Result<SymbolRef> {
 // symbolrefIdArray
 //    : Id '(' '[' symbol (',' symbol)* ']' ')'
 fn symbolref_id_array(i: Input) -> Result<Vec<Id>> {
-    between_squares(separated_list(tag(Token::Comma), symbol))(i)
+    between_brackets(separated_list(tag(Token::Comma), symbol))(i)
 }
 
 pub fn symbol(i: Input) -> Result<Id> {
@@ -114,83 +114,150 @@ pub fn call(i: Input) -> Result<Call> {
 }
 
 // op='{' (keyValuePair ',')* keyValuePair? '}'
-fn dictionary_creation(i: Input) -> Result<Creation> {
+fn dictionary_creation(i: Input) -> Result<Expression> {
     // keyValuePair
     //    : key=expression '=>' value=expression
     let key_value_pair = separated_pair(expression, tag(Token::Arrow), expression);
     map(
-        between_brackets(separated_list(tag(Token::Comma), key_value_pair)),
-        Creation::Dictionary,
+        between_braces(separated_list(tag(Token::Comma), key_value_pair)),
+        Expression::Dictionary,
     )(i)
 }
 
 // op='[' (expression ',')* expression? ']'
-fn array_creation(i: Input) -> Result<Creation> {
+fn array_creation(i: Input) -> Result<Expression> {
     map(
-        between_squares(separated_list(tag(Token::Comma), expression)),
-        Creation::Array,
+        between_brackets(separated_list(tag(Token::Comma), expression)),
+        Expression::Array,
     )(i)
 }
 
 // op='[' (expression ',')* expression? ']b'
-fn byte_array_creation(i: Input) -> Result<Creation> {
+fn byte_array_creation(i: Input) -> Result<Expression> {
     map(
         delimited(
-            tag(Token::OpenSquare),
+            tag(Token::OpenBracket),
             separated_list(tag(Token::Comma), expression),
-            tag(Token::CloseSquareB),
+            tag(Token::CloseBracketB),
         ),
-        Creation::ByteArray,
+        Expression::ByteArray,
     )(i)
 }
 
 // op='new' '[' expression ']'
-fn empty_array_creation(i: Input) -> Result<Creation> {
+fn empty_array_creation(i: Input) -> Result<Expression> {
     map(
-        preceded(tag(Token::New), between_squares(expression)),
-        |size| Creation::EmptyArray(size),
+        preceded(tag(Token::New), between_brackets(expression)),
+        |size| Expression::EmptyArray(Box::new(size)),
     )(i)
 }
 
 // op='new' '[' expression ']b'
-fn empty_byte_array_creation(i: Input) -> Result<Creation> {
+fn empty_byte_array_creation(i: Input) -> Result<Expression> {
     map(
         preceded(
             tag(Token::New),
-            delimited(tag(Token::OpenSquare), expression, tag(Token::CloseSquareB)),
+            delimited(
+                tag(Token::OpenBracket),
+                expression,
+                tag(Token::CloseBracketB),
+            ),
         ),
-        |size| Creation::EmptyByteArray(size),
+        |size| Expression::EmptyByteArray(Box::new(size)),
     )(i)
+}
+
+struct LValue<'a> {
+    global: bool,
+    extension: LValueExtension<'a>,
+}
+
+enum LValueExtension<'a> {
+    Select(Id<'a>, Option<Box<LValueExtension<'a>>>),
+    Index(Expression<'a>, Option<Box<LValueExtension<'a>>>),
+    Invoke(Id<'a>, Invocation<'a>, Box<LValueExtension<'a>>),
+}
+
+impl<'a> From<LValue<'a>> for Expression<'a> {
+    fn from(lv: LValue<'a>) -> Self {
+        if lv.global {
+            lv.extension.into_global_expr(Literal::Global.into())
+        } else {
+            lv.extension.into_local_expr()
+        }
+    }
+}
+
+impl<'a> LValueExtension<'a> {
+    fn into_local_expr(self) -> Expression<'a> {
+        let (root, extension): (Expression, _) = match self {
+            LValueExtension::Select(id, extension) => (Literal::Symbol(id).into(), extension),
+            LValueExtension::Invoke(name, arguments, extension) => {
+                (Call { name, arguments }.into(), Some(extension))
+            }
+            _ => unreachable!(),
+        };
+        if let Some(extension) = extension {
+            extension.into_global_expr(root)
+        } else {
+            root
+        }
+    }
+
+    fn into_global_expr(self, receiver: Expression<'a>) -> Expression<'a> {
+        match self {
+            LValueExtension::Select(field, extension) => {
+                let node = Select { receiver, field }.into();
+                if let Some(extension) = extension {
+                    extension.into_global_expr(node)
+                } else {
+                    node
+                }
+            }
+            LValueExtension::Invoke(method, arguments, extension) => extension.into_global_expr(
+                Invoke {
+                    receiver,
+                    method,
+                    arguments,
+                }
+                .into(),
+            ),
+            LValueExtension::Index(offset, extension) => {
+                let node = Index { receiver, offset }.into();
+                if let Some(extension) = extension {
+                    extension.into_global_expr(node)
+                } else {
+                    node
+                }
+            }
+        }
+    }
 }
 
 //lvalue
 //    : (BlingToken op='.')? symbol lvalueExtension?
 //    | (BlingToken op='.')? symbol invocation lvalueExtension
-pub fn lvalue(i: Input) -> Result<LValue> {
-    fn scope(i: Input) -> Result<Scope> {
+pub fn lvalue(i: Input) -> Result<Expression> {
+    fn is_global(i: Input) -> Result<bool> {
         map(opt(pair(tag(Token::Bling), tag(Token::Dot))), |g| {
-            if g.is_some() {
-                Scope::Global
-            } else {
-                Scope::Local
-            }
+            g.is_some()
         })(i)
     }
     let select = map(
-        tuple((scope, symbol, opt(lvalue_extension))),
-        |(scope, field, extension)| LValue {
-            scope,
+        tuple((is_global, symbol, opt(lvalue_extension))),
+        |(global, field, extension)| LValue {
+            global,
             extension: LValueExtension::Select(field, extension.map(Box::new)),
         },
     );
     let invoke = map(
-        tuple((scope, symbol, invocation, lvalue_extension)),
+        tuple((is_global, symbol, invocation, lvalue_extension)),
         |(scope, method, arguments, extension)| LValue {
-            scope,
+            global: scope,
             extension: LValueExtension::Invoke(method, arguments, Box::new(extension)),
         },
     );
-    alt((select, invoke))(i)
+    map_from(alt((select, invoke)))(i)
 }
 
 // lvalueExtension
@@ -203,7 +270,7 @@ pub fn lvalue_extension(i: Input) -> Result<LValueExtension> {
         |(field, extension)| LValueExtension::Select(field, extension.map(Box::new)),
     );
     let index = map(
-        pair(between_squares(expression), opt(lvalue_extension)),
+        pair(between_brackets(expression), opt(lvalue_extension)),
         |(offset, extension)| LValueExtension::Index(offset, extension.map(Box::new)),
     );
     let invoke = map(
@@ -218,10 +285,13 @@ pub fn lvalue_extension(i: Input) -> Result<LValueExtension> {
     alt((select, index, invoke))(i)
 }
 
-fn object_creation(i: Input) -> Result<Creation> {
+fn object_creation(i: Input) -> Result<Expression> {
     map(
         preceded(tag(Token::New), pair(lvalue, invocation)),
-        |(lvalue, args)| Creation::Object { lvalue, args },
+        |(lvalue, arguments)| Expression::Object {
+            lvalue: Box::new(lvalue),
+            arguments,
+        },
     )(i)
 }
 
@@ -232,7 +302,7 @@ fn object_creation(i: Input) -> Result<Creation> {
 //    | op='[' (expression ',')* expression? ']'
 //    | op='[' (expression ',')* expression? ']b'
 //    | op='{' (keyValuePair ',')* keyValuePair? '}'
-pub fn creation(i: Input) -> Result<Creation> {
+pub fn creation(i: Input) -> Result<Expression> {
     alt((
         object_creation,
         empty_array_creation,
@@ -255,7 +325,7 @@ pub fn group(i: Input) -> Result<Expression> {
 //    | primary arrayAccess
 //    | creation
 fn primary(i: Input) -> Result<Expression> {
-    alt((map_from(literal), group, map_from(call), map_from(creation)))(i)
+    alt((map_from(literal), group, map_from(call), creation))(i)
 }
 
 fn access(i: Input) -> Result<Expression> {
@@ -265,7 +335,7 @@ fn access(i: Input) -> Result<Expression> {
         Invoke(Id<'a>, Invocation<'a>),
     }
 
-    let index = map(between_squares(expression), Message::Index);
+    let index = map(between_brackets(expression), Message::Index);
 
     let select = map(symbol, Message::Select);
     let invoke = map(pair(symbol, invocation), |(method, arguments)| {
@@ -467,28 +537,26 @@ mod tests {
     #[test]
     fn parse_lvalue() {
         let text = "Lang.Integer";
-        let tree = LValue {
-            scope: Scope::Local,
-            extension: LValueExtension::Select(
-                Id("Lang"),
-                Some(Box::new(LValueExtension::Select(Id("Integer"), None))),
-            ),
-        };
+        let tree = Select {
+            receiver: Id("Lang").into(),
+            field: Id("Integer").into(),
+        }
+        .into();
         assert_parsing!(lvalue, text, tree)
     }
 
     #[test]
     fn parse_object_creation() {
         let text = "new Lang.Integer()";
-        let tree = Creation::Object {
-            lvalue: LValue {
-                scope: Scope::Local,
-                extension: LValueExtension::Select(
-                    Id("Lang"),
-                    Some(Box::new(LValueExtension::Select(Id("Integer"), None))),
-                ),
-            },
-            args: Default::default(),
+        let tree = Expression::Object {
+            lvalue: Box::new(
+                Select {
+                    receiver: Id("Lang").into(),
+                    field: Id("Integer").into(),
+                }
+                .into(),
+            ),
+            arguments: Default::default(),
         };
         assert_parsing!(text, tree)
     }
@@ -501,7 +569,7 @@ mod tests {
                 12 => false
             }
             "#;
-        let tree = Creation::Dictionary(vec![
+        let tree = Expression::Dictionary(vec![
             (
                 Literal::SymbolRef(SymbolRef {
                     id: Id("x"),
@@ -518,7 +586,7 @@ mod tests {
     #[test]
     fn parse_array_creation() {
         let text = r#"[:x, "hello", 12, false]"#;
-        let tree = Creation::Array(vec![
+        let tree = Expression::Array(vec![
             Literal::SymbolRef(SymbolRef {
                 id: Id("x"),
                 value: None,
@@ -534,14 +602,14 @@ mod tests {
     #[test]
     fn parse_empty_array_creation() {
         let text = "new [12]";
-        let tree = Creation::EmptyArray(12.into());
+        let tree = Expression::EmptyArray(Box::new(12.into()));
         assert_parsing!(creation, text, tree)
     }
 
     #[test]
     fn parse_byte_array_creation() {
         let text = r#"[:x, "hello", 12, false]b"#;
-        let tree = Creation::ByteArray(vec![
+        let tree = Expression::ByteArray(vec![
             Literal::SymbolRef(SymbolRef {
                 id: Id("x"),
                 value: None,
@@ -557,7 +625,7 @@ mod tests {
     #[test]
     fn parse_empty_byte_array_creation() {
         let text = "new [12]b";
-        let tree = Creation::EmptyByteArray(12.into());
+        let tree = Expression::EmptyByteArray(Box::new(12.into()));
         assert_parsing!(creation, text, tree)
     }
 

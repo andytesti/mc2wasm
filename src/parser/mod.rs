@@ -54,16 +54,16 @@ fn between_parens<'a, T: 'a>(
     between(Token::OpenParen, term, Token::CloseParen)
 }
 
-fn between_squares<'a, T: 'a>(
-    term: impl Fn(Input<'a>) -> Result<T>,
-) -> impl Fn(Input<'a>) -> Result<T> {
-    between(Token::OpenSquare, term, Token::CloseSquare)
-}
-
 fn between_brackets<'a, T: 'a>(
     term: impl Fn(Input<'a>) -> Result<T>,
 ) -> impl Fn(Input<'a>) -> Result<T> {
     between(Token::OpenBracket, term, Token::CloseBracket)
+}
+
+fn between_braces<'a, T: 'a>(
+    term: impl Fn(Input<'a>) -> Result<T>,
+) -> impl Fn(Input<'a>) -> Result<T> {
+    between(Token::OpenBrace, term, Token::CloseBrace)
 }
 
 // usingdef
@@ -110,7 +110,7 @@ fn enumdef(i: Input) -> Result<EnumDef> {
     map(
         preceded(
             tag(Token::Enum),
-            between_brackets(separated_list(tag(Token::Comma), enum_declaration)),
+            between_braces(separated_list(tag(Token::Comma), enum_declaration)),
         ),
         EnumDef,
     )(i)
@@ -183,7 +183,7 @@ fn while_statement(i: Input) -> Result<WhileStatement> {
             tag(Token::While),
             pair(between_parens(expression), code_block),
         ),
-        |(cond, body)| WhileStatement { cond, body },
+        |(cond, body)| WhileStatement { test: cond, body },
     )(i)
 }
 
@@ -198,7 +198,7 @@ fn do_statement(i: Input) -> Result<DoStatement> {
                 preceded(tag(Token::While), between_parens(expression)),
             ),
         ),
-        |(body, cond)| DoStatement { cond, body },
+        |(body, cond)| DoStatement { test: cond, body },
     )(i)
 }
 
@@ -225,10 +225,9 @@ fn for_statement(i: Input) -> Result<ForStatement> {
 //    : assignment ( ',' assignment )*
 //    | varDeclaration
 fn for_initialize(i: Input) -> Result<ForInitialize> {
-    use ForInitialize::*;
     alt((
-        map(var_declaration, VarDeclaration),
-        map(separated_list(tag(Token::Comma), assignment), Assignments),
+        map_from(var_declaration),
+        map_from(separated_list(tag(Token::Comma), assignment)),
     ))(i)
 }
 
@@ -326,6 +325,7 @@ fn statement(i: Input) -> Result<Statement> {
         map_from(if_statement),
         map_from(while_statement),
         map_from(semicolon_terminated(do_statement)),
+        map_from(for_statement),
         // switch_statement
         semicolon_terminated(break_statement),
         semicolon_terminated(continue_statement),
@@ -346,7 +346,7 @@ fn statement_sequence(i: Input) -> Result<CodeBlock> {
 //    :  '{' '}'
 //    | '{' statementSequence '}'
 fn code_block(i: Input) -> Result<CodeBlock> {
-    between_brackets(statement_sequence)(i)
+    between_braces(statement_sequence)(i)
 }
 
 // ifStatement
@@ -398,10 +398,15 @@ fn switch_stmt(i: Input) -> Result<Statement> {
             tag(Token::Switch),
             pair(
                 between_parens(expression),
-                between_brackets(many1(case_block)),
+                between_braces(many1(case_block)),
             ),
         ),
-        |(cond, case_blocks)| Statement::Switch(SwitchStatement { cond, case_blocks }),
+        |(cond, case_blocks)| {
+            Statement::Switch(SwitchStatement {
+                test: cond,
+                case_blocks,
+            })
+        },
     )(i)
 }
 
@@ -418,11 +423,7 @@ fn functiondef(i: Input) -> Result<FunctionDef> {
     let body = alt((map(tag(Token::Semicolon), |_| None), map(code_block, Some)));
     map(
         tuple((preceded(tag(Token::Function), symbol), param_decl, body)),
-        |(name, params, body)| FunctionDef {
-            id: name,
-            params,
-            body,
-        },
+        |(id, params, body)| FunctionDef { id, params, body },
     )(i)
 }
 
@@ -522,7 +523,7 @@ fn classdef(i: Input) -> Result<ClassDef> {
         tuple((
             preceded(tag(Token::Class), symbol),
             opt(preceded(tag(Token::Extends), module_id)),
-            between_brackets(many0(class_declaration)),
+            between_braces(many0(class_declaration)),
         )),
         |(id, extends_value, members)| ClassDef {
             id,
@@ -538,7 +539,7 @@ fn module_def(i: Input) -> Result<ModuleDef> {
     map(
         preceded(
             tag(Token::Module),
-            pair(symbol, between_brackets(many0(module_declaration))),
+            pair(symbol, between_braces(many0(module_declaration))),
         ),
         |(id, members)| ModuleDef { id, members },
     )(i)
@@ -558,12 +559,9 @@ fn catch_stmt(i: Input) -> Result<CatchStmt> {
 }
 
 // throwStatement: ThrowToken ( lvalue | creation );
-fn throw_statement(i: Input) -> Result<ThrowStatement> {
-    let value = alt((
-        map(lvalue, ThrowStatement::LValue),
-        map(creation, ThrowStatement::Creation),
-    ));
-    preceded(tag(Token::Throw), value)(i)
+fn throw_statement(i: Input) -> Result<Statement> {
+    let value = alt((lvalue, creation));
+    map(preceded(tag(Token::Throw), value), Statement::Throw)(i)
 }
 
 fn try_stmt(i: Input) -> Result<Statement> {
@@ -595,19 +593,19 @@ mod tests {
             let tokens = crate::lexer::token::Tokens::new(&token_input);
             let (_, actual) = $parser(tokens).unwrap();
 
-            assert_eq!(actual, $expected);
+            assert_eq!(actual, $expected.into());
         }};
 
         ($source:expr, $expected:expr) => {
-            assert_parsing!(statement, $source, $expected.into())
+            assert_parsing!(statement, $source, $expected)
         };
     }
 
     #[test]
     fn parse_using() {
-        let text = "using a.b;";
+        let text = "using Alpha.Beta;";
         let tree = UsingDef {
-            using_module: ModuleId(vec![Id("a"), Id("b")]),
+            using_module: ModuleId(vec![Id("Alpha"), Id("Beta")]),
             name: None,
         };
         assert_parsing!(usingdef, text, tree)
@@ -615,10 +613,10 @@ mod tests {
 
     #[test]
     fn parse_using_as() {
-        let text = "using a.b as d;";
+        let text = "using Alpha.Beta as Gamma;";
         let tree = UsingDef {
-            using_module: ModuleId(vec![Id("a"), Id("b")]),
-            name: Some(Id("d")),
+            using_module: ModuleId(vec![Id("Alpha"), Id("Beta")]),
+            name: Some(Id("Gamma")),
         };
         assert_parsing!(usingdef, text, tree)
     }
@@ -631,13 +629,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_throw_stmt() {
-        let text = "throw exception";
-        let tree = ThrowStatement::LValue(LValue {
-            scope: Scope::Local,
-            extension: LValueExtension::Select(Id("exception"), None),
-        });
-        assert_parsing!(throw_statement, text, tree)
+    fn parse_throw_stmt_lvalue() {
+        let text = "throw exception;";
+        let tree = Statement::Throw(Id("exception").into());
+        assert_parsing!(text, tree)
+    }
+
+    #[test]
+    fn parse_throw_creation() {
+        let text = "throw new Exception();";
+        let tree = Statement::Throw(
+            Expression::Object {
+                lvalue: Box::new(Id("Exception").into()),
+                arguments: vec![],
+            }
+            .into(),
+        );
+        assert_parsing!(text, tree)
     }
 
     #[test]
@@ -715,7 +723,7 @@ mod tests {
             true_branch: vec![Statement::Return(Some(5.into()))],
             false_branch: vec![],
         };
-        assert_parsing!(if_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     #[test]
@@ -732,7 +740,7 @@ mod tests {
             true_branch: vec![Statement::Return(Some(5.into()))],
             false_branch: vec![Statement::Return(Some(6.into()))],
         };
-        assert_parsing!(if_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     #[test]
@@ -754,7 +762,7 @@ mod tests {
             }
             .into()],
         };
-        assert_parsing!(if_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     #[test]
@@ -765,10 +773,10 @@ mod tests {
             }
         "#;
         let tree = WhileStatement {
-            cond: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
             body: vec![Statement::Break],
         };
-        assert_parsing!(while_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     #[test]
@@ -779,16 +787,16 @@ mod tests {
             } while (x > 10);
         "#;
         let tree = DoStatement {
-            cond: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
+            test: Expression::BinOp(BinOp::Greater, Box::new((Id("x").into(), 10.into()))),
             body: vec![Statement::Break],
         };
-        assert_parsing!(do_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     #[test]
     fn parse_for_initialize_declaration() {
         let text = "var alpha = 12, beta";
-        let tree = ForInitialize::VarDeclaration(VariableDef(vec![
+        let tree = VariableDef(vec![
             VariableDefPair {
                 name: Id("alpha"),
                 value: Some(12.into()),
@@ -797,30 +805,17 @@ mod tests {
                 name: Id("beta"),
                 value: None,
             },
-        ]));
+        ]);
         assert_parsing!(for_initialize, text, tree);
     }
 
     #[test]
     fn parse_for_initialize_assignments() {
         let text = "alpha = 12, ++beta";
-        let tree = ForInitialize::Assignments(vec![
-            Assignment::Infix(
-                AssignmentOp::Simple,
-                LValue {
-                    scope: Scope::Local,
-                    extension: LValueExtension::Select(Id("alpha"), None),
-                },
-                12.into(),
-            ),
-            Assignment::Prefix(
-                IncOp::Add,
-                LValue {
-                    scope: Scope::Local,
-                    extension: LValueExtension::Select(Id("beta"), None),
-                },
-            ),
-        ]);
+        let tree = vec![
+            Assignment::Infix(AssignmentOp::Simple, Id("alpha").into(), 12.into()),
+            Assignment::Prefix(IncOp::Add, Id("beta").into()),
+        ];
         assert_parsing!(for_initialize, text, tree);
     }
 
@@ -832,26 +827,21 @@ mod tests {
             }
         "#;
         let tree = ForStatement {
-            initialize: Some(ForInitialize::VarDeclaration(VariableDef(vec![
-                VariableDefPair {
+            initialize: Some(
+                VariableDef(vec![VariableDefPair {
                     name: Id("i"),
                     value: Some(1.into()),
-                },
-            ]))),
+                }])
+                .into(),
+            ),
             test: Some(Expression::BinOp(
                 BinOp::Less,
                 Box::new((Id("i").into(), 10.into())),
             )),
-            increment: vec![Assignment::Postfix(
-                IncOp::Add,
-                LValue {
-                    scope: Scope::Local,
-                    extension: LValueExtension::Select(Id("i"), None),
-                },
-            )],
+            increment: vec![Assignment::Postfix(IncOp::Add, Id("i").into())],
             body: vec![Statement::Break],
         };
-        assert_parsing!(for_statement, text, tree);
+        assert_parsing!(text, tree);
     }
 
     /*
