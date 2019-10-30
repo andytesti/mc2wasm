@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn parse_numbers() {
         assert_eq!(
-            lex_tokens("12 15L 0x40 0x12FL 0234 012l 0f 0d .12 12.0E-12d 0.14f"),
+            lex_tokens("0 12 15L 0x40 0x12FL 0234 012l 0f 0d .12 12.0E-12d 0.14f"),
             Ok((
                 "",
                 vec![

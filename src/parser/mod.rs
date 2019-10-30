@@ -1157,68 +1157,7 @@ mod tests {
         };
         assert_parsing!(text, tree);
     }
-
-    /*
-    #[test]
-    fn parse_switch_stmt() {
-        let def = r#"
-        switch(x) {
-            case 1:
-                sayHello("Mike");
-                break;
-            case "bye":
-            case instanceof Toybox.Lang.Object:
-                sayBye("Ralf");
-                break;
-            default:
-                print("Nothing to do");
-        }
-        "#;
-
-        let (_, token_input) = Lexer::tokenize(def).unwrap();
-        let tokens = Tokens::new(&token_input);
-        let (_, lit) = switch_stmt(tokens).unwrap();
-
-        assert_eq!(
-            lit,
-            Stmt::SwitchStmt(SwitchStmt {
-                cond: Expr::Literal(Literal::Symbol("x")),
-                case_blocks: vec![
-                    CaseBlock {
-                        labels: vec![CaseLabel::Literal(Literal::Integer(1))],
-                        statements: vec![
-                            Stmt::Call(CallExpr {
-                                name: "sayHello",
-                                arguments: vec![Expr::Literal(Literal::String("Mike"))],
-                            }),
-                            Stmt::Break
-                        ],
-                    },
-                    CaseBlock {
-                        labels: vec![
-                            CaseLabel::Literal(Literal::String("bye")),
-                            CaseLabel::InstanceOf(Path(vec!["Toybox", "Lang", "Object"]))
-                        ],
-                        statements: vec![
-                            Stmt::Call(CallExpr {
-                                name: "sayBye",
-                                arguments: vec![Expr::Literal(Literal::String("Ralf"))],
-                            }),
-                            Stmt::Break
-                        ],
-                    },
-                    CaseBlock {
-                        labels: vec![CaseLabel::Default],
-                        statements: vec![Stmt::Call(CallExpr {
-                            name: "print",
-                            arguments: vec![Expr::Literal(Literal::String("Nothing to do"))],
-                        })],
-                    }
-                ],
-            })
-        )
-    }
-
+/*
     #[test]
     fn parse_enum_def() {
         let def = r#"
